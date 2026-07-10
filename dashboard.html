@@ -1,0 +1,2585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>RCE Agent Tracker · Sia</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        sia: { navy:'#00205B', teal:'#009DC4', dark:'#001540', mid:'#0062A3', ice:'#F0F7FA' }
+      }
+    }
+  }
+}
+</script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.22.5/babel.min.js"></script>
+<script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+<style>
+  body { margin:0; background:#f8fafc; font-family: system-ui, -apple-system, sans-serif; }
+  .toast { animation: fadeout 0.4s ease 2.6s forwards; }
+  @keyframes fadeout { to { opacity:0; pointer-events:none; } }
+  .sidebar-link { transition: background 0.15s, color 0.15s; }
+  .stepper-line { flex:1; height:2px; background:#e2e8f0; }
+  .stepper-line.done { background:#009DC4; }
+  .drop-zone { border: 2px dashed #cbd5e1; transition: border-color 0.15s, background 0.15s; }
+  .drop-zone:hover, .drop-zone.dragover { border-color: #009DC4; background: #f0f9ff; }
+  .doc-row { transition: background 0.1s; }
+  .doc-row:hover { background: #f8fafc; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ── INDEXEDDB HELPERS ───────────────────────────────────────────────── */
+function openDocDB() {
+  return new Promise((res, rej) => {
+    try {
+      const r = indexedDB.open('rce_docs_db', 1);
+      r.onupgradeneeded = e => {
+        try { e.target.result.createObjectStore('files'); } catch(err) {}
+      };
+      r.onsuccess = e => res(e.target.result);
+      r.onerror = e => rej(e.target.error);
+    } catch(e) { rej(e); }
+  });
+}
+async function saveDocFile(id, arrayBuffer) {
+  const db = await openDocDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction('files','readwrite');
+    tx.objectStore('files').put(arrayBuffer, `doc_${id}`);
+    tx.oncomplete = res; tx.onerror = rej;
+  });
+}
+async function getDocFile(id) {
+  const db = await openDocDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction('files','readonly');
+    const req = tx.objectStore('files').get(`doc_${id}`);
+    req.onsuccess = () => res(req.result); req.onerror = rej;
+  });
+}
+async function deleteDocFile(id) {
+  const db = await openDocDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction('files','readwrite');
+    tx.objectStore('files').delete(`doc_${id}`);
+    tx.oncomplete = res; tx.onerror = rej;
+  });
+}
+
+/* ── DOC METADATA HELPERS ────────────────────────────────────────────── */
+function getDocs(agentId) {
+  const all = lsGet('rce_docs', []);
+  return all.filter(d => d.agent_id === agentId);
+}
+function addDoc(meta) {
+  const all = lsGet('rce_docs', []);
+  all.push(meta);
+  lsSet('rce_docs', all);
+}
+function removeDoc(id) {
+  const all = lsGet('rce_docs', []);
+  lsSet('rce_docs', all.filter(d => d.id !== id));
+}
+function formatBytes(b) {
+  if (!b) return '';
+  if (b < 1024) return b + ' B';
+  if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
+  return (b/1024/1024).toFixed(1) + ' MB';
+}
+
+/* ── DATA SEEDS ─────────────────────────────────────────────────────── */
+const SEED_USERS = [
+  {id:1,  name:'Maud SIBILAT-FOUCAUD',    role:'admin',     email:'maud.sibilatfoucaud@sia-partners.com',     active:true},
+  {id:2,  name:'Alice Izard',             role:'builder',   email:'alice.izard@sia-partners.com',             active:true},
+  {id:3,  name:'Alba Valdivia Plummer',   role:'validator', email:'alba.valdiviaPlummer@sia-partners.com',    active:true},
+  {id:4,  name:'Cyril Sayada',            role:'validator', email:'cyril.sayada@sia-partners.com',            active:true},
+  {id:5,  name:'Nicolas Bonnard',         role:'builder',   email:'nicolas.bonnard@sia-partners.com',         active:true},
+  {id:6,  name:'Clément Mismetti-Laleure',role:'builder',   email:'clement.mismetti@sia-partners.com',        active:true},
+  {id:7,  name:'Henri Serano',            role:'builder',   email:'henri.serano@sia-partners.com',            active:true},
+  {id:8,  name:'Shuning Yang',            role:'builder',   email:'shuning.yang@sia-partners.com',            active:true},
+  {id:9,  name:'Victoire Faramarzi',      role:'builder',   email:'victoire.faramarzi@sia-partners.com',      active:true},
+  {id:10, name:'Louis Docquer',           role:'builder',   email:'louis.docquer@sia-partners.com',           active:true},
+  {id:11, name:'Shana Amegrissi',         role:'requestor', email:'shana.amegrissi@sia-partners.com',         active:true},
+  {id:12, name:'Baptiste Epplin',         role:'requestor', email:'baptiste.epplin@sia-partners.com',         active:true},
+  {id:13, name:'Corentin Mary',           role:'requestor', email:'corentin.mary@sia-partners.com',           active:true},
+  {id:14, name:'Judy Li',                 role:'requestor', email:'judy.li@sia-partners.com',                 active:true},
+];
+
+const SEED_AGENTS = [
+  {id:1,  name:'TPRM Due Diligence Agent',        priority:'critical',build_status:'built',       requestor_id:1,  builder_id:5,  siagpt_link:null,  validation_status:'approved',description:'',business_justification:''},
+  {id:2,  name:'AI-Powered Estate Management',    priority:'high',   build_status:'to_be_started',requestor_id:14, builder_id:9,  siagpt_link:null,  validation_status:'approved',description:'',business_justification:''},
+  {id:3,  name:'KYC Adverse News Agent',          priority:'critical',build_status:'in_building', requestor_id:4,  builder_id:6,  siagpt_link:null,  validation_status:'approved',description:'',business_justification:''},
+  {id:4,  name:'Regulatory Change Monitor',       priority:'high',   build_status:'poc_only',     requestor_id:3,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:5,  name:'Regulatory Compliance Advisor',   priority:'medium', build_status:'poc_only',     requestor_id:3,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:6,  name:'Regulatory Compliance Analyzer',  priority:'medium', build_status:'poc_only',     requestor_id:3,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:7,  name:'Synthetic Data Generator',        priority:'high',   build_status:'in_building',  requestor_id:2,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:8,  name:'Contract Compliance Validator',   priority:'high',   build_status:'built',        requestor_id:2,  builder_id:8,  siagpt_link:'https://app.siagpt.ai/project/019c9528-6e76-7442-a7d4-1d06deb70b4b/chat/',validation_status:'approved',description:'',business_justification:''},
+  {id:9,  name:'GDPR Compliance Monitor',         priority:'high',   build_status:'in_building',  requestor_id:2,  builder_id:7,  siagpt_link:null,  validation_status:'approved',description:'',business_justification:''},
+  {id:10, name:'RegReview Navigator',             priority:'medium', build_status:'poc_only',     requestor_id:3,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:11, name:'Dispute Resolution Agent',        priority:'high',   build_status:'built',        requestor_id:1,  builder_id:1,  siagpt_link:'https://app.siagpt.ai/assistant/019b2e68-7095-7ffb-9093-976375357e1d',validation_status:'approved',description:'',business_justification:''},
+  {id:12, name:'GenAI Compliance Analyzer',       priority:'high',   build_status:'in_building',  requestor_id:2,  builder_id:2,  siagpt_link:null,  validation_status:'approved',description:'',business_justification:''},
+  {id:13, name:'AI for Sanctions Screening',      priority:'critical',build_status:'in_building', requestor_id:4,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:14, name:'ERM Risk Generator',              priority:'medium', build_status:'in_building',  requestor_id:11, builder_id:7,  siagpt_link:'https://app.siagpt.ai/project/019ccf2d-fb10-7b8b-8647-4fe9e37bb1c0/chat',validation_status:'approved',description:'',business_justification:''},
+  {id:15, name:'RegMatcher',                      priority:'medium', build_status:'poc_only',     requestor_id:3,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:16, name:'Legal Clause Extractor',          priority:'medium', build_status:'poc_only',     requestor_id:2,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:17, name:'Contract Validator',              priority:'medium', build_status:'poc_only',     requestor_id:2,  builder_id:7,  siagpt_link:null,  validation_status:'approved',description:'',business_justification:''},
+  {id:18, name:'Engineering Impact Assessment',   priority:'low',    build_status:'poc_only',     requestor_id:11, builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:19, name:'AML Investigator',                priority:'high',   build_status:'poc_only',     requestor_id:11, builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:20, name:'AI for KYC',                      priority:'high',   build_status:'poc_only',     requestor_id:4,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:21, name:'RFI Response Builder',            priority:'medium', build_status:'poc_only',     requestor_id:11, builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:22, name:'Voice Compliance Agent',          priority:'high',   build_status:'poc_only',     requestor_id:12, builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:23, name:'Control Gap Mapper',              priority:'medium', build_status:'poc_only',     requestor_id:12, builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:24, name:'Risk Cartography & Maturity',     priority:'medium', build_status:'poc_only',     requestor_id:12, builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:25, name:'LCBFT Agent',                     priority:'high',   build_status:'poc_only',     requestor_id:10, builder_id:10, siagpt_link:null,  validation_status:'approved',description:'',business_justification:''},
+  {id:26, name:'Investment Advisory Compliance',  priority:'medium', build_status:'poc_only',     requestor_id:12, builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:27, name:'AI Courts & Smart Justice',       priority:'low',    build_status:'poc_only',     requestor_id:13, builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:28, name:'PersonAds',                       priority:'low',    build_status:'poc_only',     requestor_id:1,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:29, name:'Contract Analyzer',               priority:'medium', build_status:'in_building',  requestor_id:1,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+  {id:30, name:'Compliance AI Assistant',         priority:'high',   build_status:'built',        requestor_id:1,  builder_id:1,  siagpt_link:'https://app.siagpt.ai',validation_status:'approved',description:'',business_justification:''},
+  {id:31, name:'Contract Assistant',              priority:'high',   build_status:'built',        requestor_id:1,  builder_id:1,  siagpt_link:'https://app.siagpt.ai',validation_status:'approved',description:'',business_justification:''},
+  {id:32, name:'Brand Guidelines Agent',          priority:'low',    build_status:'poc_only',     requestor_id:1,  builder_id:null,siagpt_link:null, validation_status:'approved',description:'',business_justification:''},
+];
+
+/* ── CONFIG ─────────────────────────────────────────────────────────── */
+const STATUS_CFG = {
+  poc_only:          {label:'POC only',          color:'#64748b', bg:'#f1f5f9'},
+  to_be_started:     {label:'To be started',     color:'#64748b', bg:'#f8fafc'},
+  in_building:       {label:'In building',       color:'#d97706', bg:'#fffbeb'},
+  built:             {label:'Built',             color:'#7c3aed', bg:'#f5f3ff'},
+  requestor_testing: {label:'Requestor Testing', color:'#0062A3', bg:'#eff6ff'},
+  tested:            {label:'Tested',            color:'#059669', bg:'#ecfdf5'},
+  live:              {label:'Live',              color:'#ca8a04', bg:'#fefce8'},
+};
+const PRIORITY_CFG = {
+  critical:{label:'Critical',color:'#dc2626',bg:'#fef2f2'},
+  high:    {label:'High',    color:'#ea580c',bg:'#fff7ed'},
+  medium:  {label:'Medium',  color:'#2563eb',bg:'#eff6ff'},
+  low:     {label:'Low',     color:'#64748b',bg:'#f8fafc'},
+};
+const BUILD_STEPS = ['to_be_started','in_building','built','requestor_testing','tested','live'];
+const ROLE_COLORS = {admin:'#b45309',builder:'#0062A3',validator:'#7c3aed',requestor:'#475569'};
+
+/* ── IMPORT COL MAP ──────────────────────────────────────────────────── */
+const COL_MAP = {
+  name:                   ['name', 'agent name', 'agent_name', 'nom'],
+  description:            ['description', 'desc', 'details'],
+  business_justification: ['business justification', 'justification', 'business_justification'],
+  priority:               ['priority', 'priorité', 'priorite'],
+  build_status:           ['build status', 'build_status', 'status', 'statut'],
+  siagpt_link:            ['siagpt link', 'siagpt_link', 'link', 'lien', 'siagpt url'],
+};
+const VALID_PRIORITIES    = ['critical','high','medium','low'];
+const VALID_BUILD_STATUSES = ['poc_only','to_be_started','in_building','built','tested','live'];
+
+/* ── STORAGE ─────────────────────────────────────────────────────────── */
+// In-memory fallback when browser blocks localStorage (Edge Tracking Prevention)
+const _mem = {};
+function lsGet(k, fallback) {
+  try {
+    const v = localStorage.getItem(k);
+    return v !== null ? JSON.parse(v) : (k in _mem ? _mem[k] : fallback);
+  } catch(e) {
+    return k in _mem ? _mem[k] : fallback;
+  }
+}
+// lsSetLocal: write to storage only (no API sync — used for init and session)
+function lsSetLocal(k, v) {
+  try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) {}
+  _mem[k] = v;
+}
+// apiSave: fire-and-forget persist to Neon via serverless API
+function apiSave(key, value) {
+  fetch('/api/save', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({key, value})
+  }).catch(() => {});
+}
+// lsSet: write locally AND push to API (used for all user-triggered saves)
+function lsSet(k, v) {
+  lsSetLocal(k, v);
+  if (k === 'rce_agents')  apiSave('agents',  v);
+  if (k === 'rce_users')   apiSave('users',   v);
+  if (k === 'rce_history') apiSave('history', v);
+}
+
+const getAgents  = () => lsGet('rce_agents',  null);
+const getUsers   = () => lsGet('rce_users',   null);
+const getHistory = () => lsGet('rce_history', []);
+const getSession = () => lsGet('rce_user',    null);
+const saveAgents  = a => lsSet('rce_agents',  a);
+const saveUsers   = u => lsSet('rce_users',   u);
+const saveHistory = h => lsSet('rce_history', h);
+const saveSession = u => lsSetLocal('rce_user', u); // session is per-browser only
+
+function seed() {
+  if (!getAgents()) lsSetLocal('rce_agents', SEED_AGENTS);
+  if (!getUsers())  lsSetLocal('rce_users',  SEED_USERS);
+}
+
+/* ── ICONS (inline SVG) ─────────────────────────────────────────────── */
+const Icon = ({d, size=16, className='', stroke='currentColor', fill='none', viewBox='0 0 24 24'}) => (
+  <svg width={size} height={size} viewBox={viewBox} fill={fill} stroke={stroke} strokeWidth="2"
+       strokeLinecap="round" strokeLinejoin="round" className={className}>
+    {Array.isArray(d) ? d.map((p,i)=><path key={i} d={p}/>) : <path d={d}/>}
+  </svg>
+);
+const IconDash      = ({size=16,c=''}) => <Icon size={size} className={c} d="M3 12h18M3 6h18M3 18h18"/>;
+const IconAgents    = ({size=16,c=''}) => <Icon size={size} className={c} d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>;
+const IconMyAgent   = ({size=16,c=''}) => <Icon size={size} className={c} d="M20 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2zM12 12a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/>;
+const IconBacklog   = ({size=16,c=''}) => <Icon size={size} className={c} d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9 2 2 4-4"/>;
+const IconValid     = ({size=16,c=''}) => <Icon size={size} className={c} d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/>;
+const IconGov       = ({size=16,c=''}) => <Icon size={size} className={c} d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>;
+const IconImport    = ({size=16,c=''}) => <Icon size={size} className={c} d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>;
+const IconChevron   = ({size=16,c='',dir='right'}) => {
+  const r = {right:0,left:180,down:90,up:-90}[dir]||0;
+  return <Icon size={size} className={c} d="M9 18l6-6-6-6" style={{transform:`rotate(${r}deg)`,transformOrigin:'center'}}/>;
+};
+const IconExtLink   = ({size=14,c=''}) => <Icon size={size} className={c} d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"/>;
+const IconX         = ({size=16,c=''}) => <Icon size={size} className={c} d="M18 6 6 18M6 6l12 12"/>;
+const IconEdit      = ({size=16,c=''}) => <Icon size={size} className={c} d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>;
+const IconCheck     = ({size=16,c=''}) => <Icon size={size} className={c} d="M20 6 9 17l-5-5"/>;
+const IconArrow     = ({size=16,c='',dir='right'}) => {
+  const paths = {right:'M5 12h14M12 5l7 7-7 7',left:'M19 12H5M12 5l-7 7 7 7',up:'M12 19V5M5 12l7-7 7 7',down:'M12 5v14M5 12l7 7 7-7'};
+  return <Icon size={size} className={c} d={paths[dir]||paths.right}/>;
+};
+const IconLogout    = ({size=16,c=''}) => <Icon size={size} className={c} d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>;
+const IconUser      = ({size=16,c=''}) => <Icon size={size} className={c} d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/>;
+const IconUsers     = ({size=16,c=''}) => <Icon size={size} className={c} d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>;
+const IconMenu      = ({size=16,c=''}) => <Icon size={size} className={c} d="M3 12h18M3 6h18M3 18h18"/>;
+const IconPaperclip = ({size=16,c=''}) => <Icon size={size} className={c} d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>;
+const IconDownload  = ({size=16,c=''}) => <Icon size={size} className={c} d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>;
+const IconTrash     = ({size=16,c=''}) => <Icon size={size} className={c} d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>;
+const IconFile      = ({size=16,c=''}) => <Icon size={size} className={c} d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8"/>;
+
+/* ── HELPERS ─────────────────────────────────────────────────────────── */
+function StatusBadge({status}) {
+  const cfg = STATUS_CFG[status] || {label:status, color:'#64748b', bg:'#f1f5f9'};
+  return (
+    <span className="text-xs font-semibold px-2 py-0.5 rounded-full inline-flex items-center gap-1"
+          style={{color:cfg.color, background:cfg.bg}}>
+      <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background:cfg.color}}/>
+      {cfg.label}
+    </span>
+  );
+}
+function PriorityBadge({priority}) {
+  const cfg = PRIORITY_CFG[priority] || {label:priority, color:'#64748b', bg:'#f8fafc'};
+  return (
+    <span className="text-xs font-semibold px-2 py-0.5 rounded-full"
+          style={{color:cfg.color, background:cfg.bg}}>
+      {cfg.label}
+    </span>
+  );
+}
+function initials(name) {
+  return name.split(' ').map(p=>p[0]).join('').slice(0,2).toUpperCase();
+}
+function userName(id, users) {
+  const u = users.find(u=>u.id===id);
+  return u ? u.name : '—';
+}
+function navigate(hash) {
+  window.location.hash = hash;
+}
+function useHash() {
+  const [hash, setHash] = useState(window.location.hash || '#/dashboard');
+  useEffect(() => {
+    const h = () => setHash(window.location.hash || '#/dashboard');
+    window.addEventListener('hashchange', h);
+    return () => window.removeEventListener('hashchange', h);
+  }, []);
+  return hash;
+}
+
+/* ── TOAST ───────────────────────────────────────────────────────────── */
+let _setToast = null;
+function Toast() {
+  const [msg, setMsg] = useState(null);
+  _setToast = m => { setMsg(m); setTimeout(()=>setMsg(null), 3200); };
+  if (!msg) return null;
+  return (
+    <div className="toast fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-sia-navy text-white text-sm font-semibold px-5 py-3 rounded-xl shadow-xl flex items-center gap-2">
+      <IconCheck size={14} c="text-sia-teal"/>
+      {msg}
+    </div>
+  );
+}
+function showToast(m) { _setToast && _setToast(m); }
+
+/* ── SIDEBAR ─────────────────────────────────────────────────────────── */
+function Sidebar({user, open, onClose}) {
+  const hash = useHash();
+  const pageFull = hash.replace(/^#\//, '') || 'dashboard';
+  const page = pageFull.split('/')[0] || 'dashboard';
+  const isAdmin = user?.role === 'admin';
+  const isBuilder = user?.role === 'builder';
+  const isValidator = user?.role === 'validator';
+
+  const links = [
+    {key:'dashboard',  label:'Dashboard',       icon: <IconDash size={16}/>,    show:true},
+    {key:'agents',     label:'All Agents',      icon: <IconAgents size={16}/>,  show:true},
+    {key:'validation', label:'Validation Queue', icon: <IconValid size={16}/>,  show:isAdmin||isValidator},
+    {key:'backlog',    label:'Backlog',          icon: <IconBacklog size={16}/>, show:isAdmin||isBuilder},
+    {key:'my-agents',  label:'My Agents',       icon: <IconMyAgent size={16}/>, show:true},
+    {key:'admin/team', label:'Team',            icon: <IconUsers size={16}/>,   show:isAdmin},
+    {key:'governance', label:'Governance',      icon: <IconGov size={16}/>,     show:true},
+    {key:'import',     label:'Import',          icon: <IconImport size={16}/>,  show:isAdmin||isBuilder},
+  ];
+
+  const sidebarContent = (
+    <div className="flex flex-col h-full">
+      {/* Logo */}
+      <div className="px-5 py-5 border-b border-white/10">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-black text-sm"
+               style={{background:'linear-gradient(135deg,#009DC4,#00205B)'}}>S</div>
+          <div>
+            <div className="text-white font-bold text-sm leading-none">RCE Agents</div>
+            <div className="text-white/40 text-[10px] mt-0.5">AI Tracker</div>
+          </div>
+          {onClose && (
+            <button onClick={onClose} className="ml-auto text-white/40 hover:text-white lg:hidden">
+              <IconX size={18}/>
+            </button>
+          )}
+        </div>
+      </div>
+      {/* Nav */}
+      <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
+        {links.filter(l=>l.show).map(l => {
+          const active = pageFull === l.key || page === l.key.split('/')[0] && l.key === pageFull;
+          return (
+            <a key={l.key} href={`#/${l.key}`}
+               onClick={onClose}
+               className={`sidebar-link flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium cursor-pointer no-underline
+                 ${active ? 'bg-white/15 text-white' : 'text-white/60 hover:bg-white/8 hover:text-white'}`}>
+              <span className={active ? 'text-sia-teal' : ''}>{l.icon}</span>
+              {l.label}
+            </a>
+          );
+        })}
+      </nav>
+      {/* Footer */}
+      <div className="px-5 py-4 border-t border-white/10">
+        {user ? (
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
+                 style={{background:ROLE_COLORS[user.role]||'#475569'}}>
+              {initials(user.name)}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-white text-xs font-semibold truncate">{user.name.split(' ')[0]}</div>
+              <div className="text-white/40 text-[10px] capitalize">{user.role}</div>
+            </div>
+            <button onClick={()=>{ saveSession(null); navigate('#/login'); }}
+                    className="text-white/40 hover:text-white">
+              <IconLogout size={14}/>
+            </button>
+          </div>
+        ) : null}
+        <div className="text-white/25 text-[9px] mt-3 font-medium uppercase tracking-widest">Sia · FSI &amp; Tech BUs</div>
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      {/* Desktop sidebar */}
+      <aside className="hidden lg:flex flex-col w-56 flex-shrink-0 h-screen sticky top-0"
+             style={{background:'linear-gradient(180deg,#001540 0%,#00205B 100%)'}}>
+        {sidebarContent}
+      </aside>
+      {/* Mobile overlay */}
+      {open && (
+        <div className="lg:hidden fixed inset-0 z-40 flex">
+          <div className="fixed inset-0 bg-black/50" onClick={onClose}/>
+          <aside className="relative w-64 flex flex-col h-full z-50"
+                 style={{background:'linear-gradient(180deg,#001540 0%,#00205B 100%)'}}>
+            {sidebarContent}
+          </aside>
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ── LOGIN PAGE ─────────────────────────────────────────────────────── */
+function LoginPage() {
+  const users = getUsers() || SEED_USERS;
+  const roleOrder = {admin:0,validator:1,builder:2,requestor:3};
+  const sorted = [...users].filter(u => u.active !== false).sort((a,b)=>(roleOrder[a.role]||9)-(roleOrder[b.role]||9));
+
+  function login(u) {
+    saveSession(u);
+    navigate('#/dashboard');
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center px-6 py-12"
+         style={{background:'linear-gradient(135deg,#001540 0%,#00205B 60%,#009DC4 100%)'}}>
+      <div className="mb-10 text-center">
+        <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-white/10 mb-4">
+          <span className="text-white font-black text-2xl">S</span>
+        </div>
+        <h1 className="text-3xl font-extrabold text-white mb-1">RCE Agent Tracker</h1>
+        <p className="text-white/50 text-sm">Select your profile to continue</p>
+      </div>
+
+      <div className="w-full max-w-4xl grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+        {sorted.map(u => (
+          <button key={u.id} onClick={()=>login(u)}
+                  className="bg-white/10 hover:bg-white/20 transition-all rounded-2xl px-4 py-4 text-left border border-white/10 hover:border-white/30 group">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold text-sm mb-3"
+                 style={{background:ROLE_COLORS[u.role]||'#475569'}}>
+              {initials(u.name)}
+            </div>
+            <div className="text-white font-semibold text-sm leading-snug mb-1">{u.name}</div>
+            <div className="text-white/40 text-[11px] capitalize font-medium">{u.role}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── DASHBOARD PAGE ─────────────────────────────────────────────────── */
+function DashboardPage({user}) {
+  const agents = getAgents() || [];
+  const users  = getUsers()  || [];
+  const history = getHistory();
+  const [showRequestModal, setShowRequestModal] = useState(false);
+
+  const byStatus = key => agents.filter(a=>a.build_status===key).length;
+  const live     = byStatus('live');
+  const total    = agents.length;
+  const inBuild  = byStatus('in_building');
+  const built    = byStatus('built');
+  const tested   = byStatus('tested');
+
+  const funnelStages = [
+    {key:'poc_only',      label:'POC Only',      n: byStatus('poc_only')+byStatus('to_be_started'), color:'#64748b'},
+    {key:'in_building',   label:'In Building',   n: inBuild,  color:'#d97706'},
+    {key:'built',         label:'Built',         n: built,    color:'#7c3aed'},
+    {key:'tested',        label:'Tested',        n: tested,   color:'#059669'},
+    {key:'live',          label:'Live',          n: live,     color:'#ca8a04'},
+  ];
+  const maxF = Math.max(...funnelStages.map(s=>s.n), 1);
+
+  // Builder workload
+  const builders = users.filter(u=>u.role==='builder'||u.role==='admin');
+  const builderLoad = builders.map(b => ({
+    name: b.name.split(' ')[0],
+    count: agents.filter(a=>a.builder_id===b.id && ['in_building','built','tested'].includes(a.build_status)).length,
+  })).filter(b=>b.count>0).sort((a,b)=>b.count-a.count);
+  const maxLoad = Math.max(...builderLoad.map(b=>b.count), 1);
+
+  // Monthly completions (last 12 months from history)
+  const now = new Date();
+  const months = Array.from({length:12},(_,i)=>{
+    const d = new Date(now.getFullYear(), now.getMonth()-11+i, 1);
+    return {label: d.toLocaleDateString('en',{month:'short'}), year:d.getFullYear(), month:d.getMonth()};
+  });
+  const builtHistory = history.filter(h=>h.to==='built'||h.to==='live'||h.to==='tested');
+  const monthCounts = months.map(m => ({
+    ...m,
+    n: builtHistory.filter(h=>{
+      const d=new Date(h.date);
+      return d.getFullYear()===m.year && d.getMonth()===m.month;
+    }).length
+  }));
+  const maxM = Math.max(...monthCounts.map(m=>m.n), 1);
+
+  return (
+    <div className="space-y-6">
+      {showRequestModal && (
+        <RequestAgentModal user={user} onClose={()=>setShowRequestModal(false)}/>
+      )}
+      {/* Header */}
+      <div className="rounded-2xl px-7 py-6 text-white relative overflow-hidden"
+           style={{background:'linear-gradient(135deg,#001540 0%,#00205B 50%,#0062A3 80%,#009DC4 100%)'}}>
+        <div className="absolute inset-0 pointer-events-none"
+             style={{backgroundImage:'linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px)',backgroundSize:'32px 32px'}}/>
+        <div className="relative z-10 flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <p className="text-white/50 text-xs font-bold uppercase tracking-widest mb-1">Sia · FSI &amp; Tech BUs</p>
+            <h1 className="text-2xl font-extrabold tracking-tight">RCE Agent Tracker</h1>
+            <p className="text-white/55 text-sm mt-1">AI agent pipeline overview</p>
+          </div>
+          <div className="flex items-center gap-6">
+            <div className="text-center">
+              <div className="text-5xl font-black" style={{color:'#fbbf24'}}>{live}</div>
+              <div className="text-white/50 text-xs font-bold uppercase tracking-widest mt-1">Live Agents</div>
+            </div>
+            <button onClick={()=>setShowRequestModal(true)}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold text-white whitespace-nowrap flex-shrink-0 hover:opacity-90 transition-opacity"
+                    style={{background:'linear-gradient(135deg,#00205B 0%,#009DC4 100%)', border:'1.5px solid rgba(255,255,255,0.25)'}}>
+              <span className="text-lg leading-none font-black">+</span> Request a new agent
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        {[
+          {label:'Total Agents', n:total, color:'#00205B'},
+          {label:'In Building',  n:inBuild, color:'#d97706'},
+          {label:'Built',        n:built,   color:'#7c3aed'},
+          {label:'Tested',       n:tested,  color:'#059669'},
+        ].map(k=>(
+          <div key={k.label} className="bg-white rounded-2xl border border-slate-100 px-5 py-4 shadow-sm">
+            <div className="text-3xl font-black mb-1" style={{color:k.color}}>{k.n}</div>
+            <div className="text-xs font-semibold text-slate-500">{k.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Funnel + Builder Workload */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Pipeline Funnel */}
+        <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
+          <h2 className="text-sm font-bold text-slate-800 mb-4">Pipeline Funnel</h2>
+          <div className="space-y-3">
+            {funnelStages.map(s=>(
+              <div key={s.key}>
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <span className="font-medium text-slate-600">{s.label}</span>
+                  <span className="font-bold" style={{color:s.color}}>{s.n}</span>
+                </div>
+                <div className="h-6 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full transition-all"
+                       style={{width:`${(s.n/maxF)*100}%`, background:s.color, minWidth: s.n>0?'24px':0}}/>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Builder Workload */}
+        <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
+          <h2 className="text-sm font-bold text-slate-800 mb-4">Builder Workload</h2>
+          {builderLoad.length === 0 ? (
+            <p className="text-sm text-slate-400">No active assignments</p>
+          ) : (
+            <div className="space-y-3">
+              {builderLoad.map(b=>(
+                <div key={b.name}>
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="font-medium text-slate-600">{b.name}</span>
+                    <span className="font-bold text-sia-mid">{b.count}</span>
+                  </div>
+                  <div className="h-5 bg-slate-100 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full transition-all"
+                         style={{width:`${(b.count/maxLoad)*100}%`, background:'linear-gradient(90deg,#00205B,#009DC4)'}}/>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Completion Trend */}
+      <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
+        <h2 className="text-sm font-bold text-slate-800 mb-4">Completion Trend (last 12 months)</h2>
+        <div className="flex items-end gap-2 h-28">
+          {monthCounts.map((m,i)=>(
+            <div key={i} className="flex-1 flex flex-col items-center gap-1">
+              <div className="w-full rounded-t-sm transition-all"
+                   style={{height:`${maxM>0?(m.n/maxM)*96:4}px`, minHeight:'4px',
+                           background: m.n>0 ? 'linear-gradient(180deg,#009DC4,#00205B)' : '#e2e8f0'}}/>
+              <span className="text-[9px] text-slate-400 font-medium">{m.label}</span>
+            </div>
+          ))}
+        </div>
+        {builtHistory.length === 0 && (
+          <p className="text-xs text-slate-400 mt-2">No status history recorded yet — history is created when you update statuses.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── ALL AGENTS PAGE ─────────────────────────────────────────────────── */
+function AgentsPage({user}) {
+  const [agents, setAgents] = useState(getAgents() || []);
+  const users = getUsers() || [];
+  const [search, setSearch] = useState('');
+  const [statusF, setStatusF] = useState('');
+  const [priorityF, setPriorityF] = useState('');
+  const [showRequestModal, setShowRequestModal] = useState(false);
+
+  function refreshAgents() { setAgents(getAgents() || []); }
+
+  const filtered = agents.filter(a => {
+    const matchSearch = !search || a.name.toLowerCase().includes(search.toLowerCase());
+    const matchStatus = !statusF || a.build_status === statusF;
+    const matchPri = !priorityF || a.priority === priorityF;
+    return matchSearch && matchStatus && matchPri;
+  });
+
+  return (
+    <div className="space-y-4">
+      {showRequestModal && (
+        <RequestAgentModal user={user} onClose={()=>setShowRequestModal(false)} onSubmitted={refreshAgents}/>
+      )}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h1 className="text-xl font-extrabold text-slate-800">All Agents <span className="text-slate-400 font-normal text-base">({agents.length})</span></h1>
+        <button onClick={()=>setShowRequestModal(true)}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-white whitespace-nowrap hover:opacity-90 transition-opacity"
+                style={{background:'linear-gradient(135deg,#00205B 0%,#009DC4 100%)'}}>
+          <span className="text-base leading-none font-black">+</span> Request a new agent
+        </button>
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-wrap gap-2">
+        <input value={search} onChange={e=>setSearch(e.target.value)}
+               placeholder="Search agents…"
+               className="border border-slate-200 rounded-xl px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-sia-teal/30"/>
+        <select value={statusF} onChange={e=>setStatusF(e.target.value)}
+                className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30">
+          <option value="">All statuses</option>
+          {Object.entries(STATUS_CFG).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+        </select>
+        <select value={priorityF} onChange={e=>setPriorityF(e.target.value)}
+                className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30">
+          <option value="">All priorities</option>
+          {Object.entries(PRIORITY_CFG).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+        </select>
+        {(search||statusF||priorityF) && (
+          <button onClick={()=>{setSearch('');setStatusF('');setPriorityF('');}}
+                  className="text-xs text-slate-500 hover:text-slate-800 px-3 py-2 rounded-xl border border-slate-200">
+            Clear
+          </button>
+        )}
+      </div>
+
+      {/* Table */}
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-slate-100">
+              <th className="text-left px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-wider">Agent</th>
+              <th className="text-left px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-wider">Status</th>
+              <th className="text-left px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-wider">Priority</th>
+              <th className="text-left px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-wider hidden sm:table-cell">Builder</th>
+              <th className="px-4 py-3"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 && (
+              <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400 text-sm">No agents found</td></tr>
+            )}
+            {filtered.map(a => (
+              <tr key={a.id} onClick={()=>navigate(`#/agents/${a.id}`)}
+                  className="border-b border-slate-50 hover:bg-slate-50 cursor-pointer">
+                <td className="px-4 py-3 font-medium text-slate-800">{a.name}</td>
+                <td className="px-4 py-3"><StatusBadge status={a.build_status}/></td>
+                <td className="px-4 py-3"><PriorityBadge priority={a.priority}/></td>
+                <td className="px-4 py-3 text-slate-500 hidden sm:table-cell text-xs">
+                  {a.builder_id ? userName(a.builder_id, users) : <span className="text-slate-300">—</span>}
+                </td>
+                <td className="px-4 py-3">
+                  {a.siagpt_link && (
+                    <a href={a.siagpt_link} target="_blank" rel="noopener noreferrer"
+                       onClick={e=>e.stopPropagation()}
+                       className="text-sia-teal hover:text-sia-navy inline-flex items-center gap-1 text-xs font-medium">
+                      SiaGPT <IconExtLink size={11}/>
+                    </a>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ── DOC FILE TYPE ICON COLOR ────────────────────────────────────────── */
+function docIconColor(type, name) {
+  const ext = (name||'').split('.').pop().toLowerCase();
+  if (['ppt','pptx'].includes(ext)) return '#ea580c';
+  if (['doc','docx'].includes(ext)) return '#2563eb';
+  if (['pdf'].includes(ext)) return '#dc2626';
+  if (['xlsx','xls','csv'].includes(ext)) return '#16a34a';
+  return '#64748b';
+}
+
+/* ── DOCUMENTS SECTION ───────────────────────────────────────────────── */
+function DocumentsSection({agentId, user, canEdit, isBuilder}) {
+  const [docs, setDocs] = useState([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    setDocs(getDocs(agentId));
+  }, [agentId]);
+
+  async function handleFiles(files) {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    for (const file of Array.from(files)) {
+      if (file.size > 50 * 1024 * 1024) {
+        showToast(`"${file.name}" exceeds 50 MB limit — skipped`);
+        continue;
+      }
+      try {
+        const buf = await file.arrayBuffer();
+        const id = Date.now() + Math.floor(Math.random()*1000);
+        await saveDocFile(id, buf);
+        const meta = {
+          id,
+          agent_id: agentId,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          uploaded_by_id: user.id,
+          uploaded_at: new Date().toISOString(),
+        };
+        addDoc(meta);
+        setDocs(getDocs(agentId));
+        showToast(`"${file.name}" uploaded`);
+      } catch(e) {
+        showToast(`Failed to upload "${file.name}"`);
+      }
+    }
+    setUploading(false);
+  }
+
+  function onDrop(e) {
+    e.preventDefault();
+    setDragOver(false);
+    handleFiles(e.dataTransfer.files);
+  }
+
+  async function downloadDoc(doc) {
+    try {
+      const buf = await getDocFile(doc.id);
+      if (!buf) { showToast('File not found in storage'); return; }
+      const blob = new Blob([buf], {type: doc.type || 'application/octet-stream'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = doc.name;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch(e) {
+      showToast('Download failed');
+    }
+  }
+
+  async function deleteDoc(doc) {
+    try {
+      await deleteDocFile(doc.id);
+    } catch(e) { /* ignore */ }
+    removeDoc(doc.id);
+    setDocs(getDocs(agentId));
+    showToast(`"${doc.name}" deleted`);
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+      <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+        <IconPaperclip size={13} c="text-slate-400"/> Documents
+      </p>
+
+      {/* Upload zone — only for canEdit && isBuilder */}
+      {canEdit && isBuilder && (
+        <div
+          className={`drop-zone rounded-xl px-5 py-7 text-center mb-4 cursor-pointer select-none ${dragOver ? 'dragover' : ''}`}
+          onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+          onDragLeave={()=>setDragOver(false)}
+          onDrop={onDrop}
+          onClick={()=>fileInputRef.current && fileInputRef.current.click()}
+        >
+          <input ref={fileInputRef} type="file" className="hidden"
+                 accept=".ppt,.pptx,.docx,.doc,.pdf,.xlsx,.xls,.csv"
+                 multiple
+                 onChange={e=>handleFiles(e.target.files)}/>
+          <IconPaperclip size={22} c="text-slate-300 mx-auto mb-2"/>
+          <p className="text-sm text-slate-500 font-medium">
+            {uploading ? 'Uploading…' : 'Drop files here or browse'}
+          </p>
+          <p className="text-xs text-slate-400 mt-1">PPT, PPTX, DOCX, PDF, XLSX up to 50 MB</p>
+        </div>
+      )}
+
+      {/* Doc list */}
+      {docs.length === 0 ? (
+        <p className="text-sm text-slate-400">No documents attached yet.</p>
+      ) : (
+        <div className="space-y-1">
+          {docs.map(doc => (
+            <div key={doc.id} className="doc-row flex items-center gap-3 px-3 py-2.5 rounded-xl">
+              <div className="flex-shrink-0">
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center"
+                     style={{background: docIconColor(doc.type, doc.name) + '18'}}>
+                  <IconFile size={14} c="" style={{color: docIconColor(doc.type, doc.name)}}/>
+                </div>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-slate-700 truncate">{doc.name}</div>
+                <div className="text-[11px] text-slate-400">
+                  {formatBytes(doc.size)} · {new Date(doc.uploaded_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <button onClick={()=>downloadDoc(doc)}
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-sia-teal hover:bg-sia-ice transition-colors"
+                        title="Download">
+                  <IconDownload size={14}/>
+                </button>
+                {canEdit && isBuilder && (
+                  <button onClick={()=>deleteDoc(doc)}
+                          className="p-1.5 rounded-lg text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors"
+                          title="Delete">
+                    <IconTrash size={14}/>
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── AGENT DETAIL PAGE ───────────────────────────────────────────────── */
+function AgentDetailPage({user, agentId}) {
+  const id = parseInt(agentId);
+  const [agents, setAgents] = useState(getAgents() || []);
+  const users = getUsers() || [];
+  const [history, setHistory] = useState(getHistory());
+  const [showStatusPanel, setShowStatusPanel] = useState(false);
+  const [showEditPanel, setShowEditPanel] = useState(false);
+  const [newStatus, setNewStatus] = useState('');
+  const [comment, setComment] = useState('');
+  const [editForm, setEditForm] = useState(null);
+
+  const agent = agents.find(a=>a.id===id);
+  if (!agent) return <div className="text-slate-500 p-8">Agent not found. <a href="#/agents" className="text-sia-teal underline">Back to agents</a></div>;
+
+  const canEdit = user && ['builder','admin'].includes(user.role);
+  const isBuilder = user && (agent.builder_id === user.id || user.role === 'admin');
+  const agentHistory = history.filter(h=>h.agent_id===id).sort((a,b)=>new Date(b.date)-new Date(a.date));
+
+  const stepIdx = BUILD_STEPS.indexOf(agent.build_status);
+
+  function saveStatus() {
+    if (!newStatus) return;
+    const cur = agents.find(a=>a.id===id);
+    const isAdminOrValidator = user && ['admin','validator'].includes(user.role);
+    const isRequestor = user && cur.requestor_id === user.id;
+    // Requestor-testing gate: only requestor (or admin) can mark as tested
+    if (newStatus === 'tested' && cur.build_status === 'requestor_testing' && !isRequestor && user?.role !== 'admin') {
+      showToast('Only the requestor can confirm testing is complete'); return;
+    }
+    // Pre-live gate: non-admin/validator cannot directly set live — queue instead
+    if (newStatus === 'live' && !isAdminOrValidator) {
+      const updated = agents.map(a => a.id===id ? {...a, live_approval_pending:true} : a);
+      saveAgents(updated);
+      setAgents(updated);
+      setShowStatusPanel(false); setNewStatus(''); setComment('');
+      showToast('Submitted for live approval — an admin or validator will review');
+      return;
+    }
+    const patch = {build_status:newStatus};
+    if (newStatus === 'live') patch.live_approval_pending = false;
+    const updated = agents.map(a => a.id===id ? {...a, ...patch} : a);
+    saveAgents(updated);
+    const h = [...history, {
+      id: Date.now(), agent_id:id, from:cur.build_status, to:newStatus,
+      user_id:user.id, user_name:user.name, comment, date:new Date().toISOString()
+    }];
+    saveHistory(h);
+    setAgents(updated);
+    setHistory(h);
+    setShowStatusPanel(false);
+    setNewStatus('');
+    setComment('');
+    showToast('Status updated successfully');
+  }
+
+  function saveEdit() {
+    if (!editForm) return;
+    const updated = agents.map(a => a.id===id ? {...a, ...editForm} : a);
+    saveAgents(updated);
+    setAgents(updated);
+    setShowEditPanel(false);
+    showToast('Agent updated successfully');
+  }
+
+  function openEdit() {
+    setEditForm({
+      name: agent.name,
+      description: agent.description || '',
+      business_justification: agent.business_justification || '',
+      priority: agent.priority,
+      siagpt_link: agent.siagpt_link || '',
+      claude_skill_link: agent.claude_skill_link || '',
+      other_link: agent.other_link || '',
+      notes: agent.notes || '',
+    });
+    setShowEditPanel(true);
+  }
+
+  const currentAgent = agents.find(a=>a.id===id);
+
+  return (
+    <div className="space-y-5 max-w-3xl">
+      {/* Back + Header */}
+      <button onClick={()=>navigate('#/agents')}
+              className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800 font-medium">
+        <IconArrow size={14} dir="left"/> Back to agents
+      </button>
+
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex-1 min-w-0">
+            {showEditPanel ? (
+              <input value={editForm.name} onChange={e=>setEditForm({...editForm,name:e.target.value})}
+                     className="text-xl font-bold text-slate-800 border-b border-sia-teal w-full focus:outline-none bg-transparent"/>
+            ) : (
+              <h1 className="text-xl font-bold text-slate-800 leading-snug">{currentAgent.name}</h1>
+            )}
+            <div className="flex items-center gap-2 mt-2 flex-wrap">
+              <PriorityBadge priority={currentAgent.priority}/>
+              <StatusBadge status={currentAgent.build_status}/>
+              {currentAgent.siagpt_link && (
+                <a href={currentAgent.siagpt_link} target="_blank" rel="noopener noreferrer"
+                   className="text-sia-teal hover:underline text-xs font-medium flex items-center gap-1">
+                  SiaGPT <IconExtLink size={11}/>
+                </a>
+              )}
+              {currentAgent.claude_skill_link && (
+                <a href={currentAgent.claude_skill_link} target="_blank" rel="noopener noreferrer"
+                   className="text-sia-teal hover:underline text-xs font-medium flex items-center gap-1">
+                  Claude Skill <IconExtLink size={11}/>
+                </a>
+              )}
+              {currentAgent.other_link && (
+                <a href={currentAgent.other_link} target="_blank" rel="noopener noreferrer"
+                   className="text-sia-teal hover:underline text-xs font-medium flex items-center gap-1">
+                  Other link <IconExtLink size={11}/>
+                </a>
+              )}
+            </div>
+          </div>
+          {canEdit && isBuilder && (
+            <div className="flex gap-2 flex-shrink-0">
+              <button onClick={()=>setShowStatusPanel(v=>!v)}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold border border-sia-teal text-sia-teal hover:bg-sia-teal hover:text-white transition-colors">
+                <IconArrow size={13} dir="up"/> Update status
+              </button>
+              <button onClick={showEditPanel ? ()=>setShowEditPanel(false) : openEdit}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold border border-slate-200 text-slate-600 hover:border-slate-400 transition-colors">
+                <IconEdit size={13}/> {showEditPanel ? 'Cancel' : 'Edit'}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Status Update Panel */}
+        {showStatusPanel && (
+          <div className="mt-5 p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Update build status</p>
+            <select value={newStatus} onChange={e=>setNewStatus(e.target.value)}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30">
+              <option value="">Select new status…</option>
+              {Object.entries(STATUS_CFG).map(([k,v])=>(
+                <option key={k} value={k} disabled={k===currentAgent.build_status}>{v.label}{k===currentAgent.build_status?' (current)':''}</option>
+              ))}
+            </select>
+            <textarea value={comment} onChange={e=>setComment(e.target.value)}
+                      placeholder="Add a comment (optional)…"
+                      rows={2}
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30 resize-none"/>
+            <div className="flex gap-2">
+              <button onClick={saveStatus} disabled={!newStatus}
+                      className="px-4 py-2 rounded-lg bg-sia-navy text-white text-sm font-semibold disabled:opacity-40 hover:bg-sia-mid transition-colors">
+                Save
+              </button>
+              <button onClick={()=>setShowStatusPanel(false)}
+                      className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm font-semibold hover:bg-slate-50">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Edit Panel */}
+        {showEditPanel && editForm && (
+          <div className="mt-5 p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Edit agent details</p>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 block mb-1">Description</label>
+              <textarea value={editForm.description} onChange={e=>setEditForm({...editForm,description:e.target.value})}
+                        rows={3} placeholder="Describe what this agent does…"
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30 resize-none"/>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 block mb-1">Business justification</label>
+              <textarea value={editForm.business_justification} onChange={e=>setEditForm({...editForm,business_justification:e.target.value})}
+                        rows={2} placeholder="Why is this agent needed?"
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30 resize-none"/>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 block mb-1">Priority</label>
+              <div className="flex gap-2 flex-wrap">
+                {Object.entries(PRIORITY_CFG).map(([k,v])=>(
+                  <button key={k} onClick={()=>setEditForm({...editForm,priority:k})}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all"
+                          style={editForm.priority===k ? {color:v.color,background:v.bg,borderColor:v.color} : {color:'#64748b',background:'#fff',borderColor:'#e2e8f0'}}>
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 block mb-1">SiaGPT link</label>
+              <input value={editForm.siagpt_link} onChange={e=>setEditForm({...editForm,siagpt_link:e.target.value})}
+                     placeholder="https://app.siagpt.ai/…"
+                     className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30"/>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 block mb-1">Claude Skill link</label>
+              <input value={editForm.claude_skill_link} onChange={e=>setEditForm({...editForm,claude_skill_link:e.target.value})}
+                     placeholder="https://…"
+                     className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30"/>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 block mb-1">Other link</label>
+              <input value={editForm.other_link} onChange={e=>setEditForm({...editForm,other_link:e.target.value})}
+                     placeholder="https://…"
+                     className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30"/>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-500 block mb-1">Notes</label>
+              <textarea value={editForm.notes} onChange={e=>setEditForm({...editForm,notes:e.target.value})}
+                        rows={3} placeholder="Internal notes, context, or observations…"
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30 resize-none"/>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={saveEdit}
+                      className="px-4 py-2 rounded-lg bg-sia-navy text-white text-sm font-semibold hover:bg-sia-mid transition-colors">
+                Save changes
+              </button>
+              <button onClick={()=>setShowEditPanel(false)}
+                      className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm font-semibold hover:bg-slate-50">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Status Stepper */}
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+        <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Build Progress</p>
+        <div className="flex items-center">
+          {BUILD_STEPS.map((s,i)=>{
+            const done = BUILD_STEPS.indexOf(currentAgent.build_status) >= i;
+            const cfg = STATUS_CFG[s];
+            return (
+              <React.Fragment key={s}>
+                <div className="flex flex-col items-center text-center flex-shrink-0">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-all ${done ? 'text-white border-transparent' : 'text-slate-300 border-slate-200 bg-white'}`}
+                       style={done ? {background:cfg.color,borderColor:cfg.color} : {}}>
+                    {done ? <IconCheck size={13}/> : i+1}
+                  </div>
+                  <span className="text-[9px] font-semibold mt-1 text-slate-500 w-16 leading-tight">{cfg.label}</span>
+                </div>
+                {i < BUILD_STEPS.length-1 && (
+                  <div className={`stepper-line mx-1 flex-1 ${BUILD_STEPS.indexOf(currentAgent.build_status) > i ? 'done' : ''}`}/>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Info Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+          <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">People</p>
+          <div className="space-y-3">
+            <div>
+              <p className="text-[10px] text-slate-400 font-semibold mb-0.5">Requestor</p>
+              <p className="text-sm font-semibold text-slate-700">{userName(currentAgent.requestor_id, users)}</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-slate-400 font-semibold mb-0.5">Builder</p>
+              <p className="text-sm font-semibold text-slate-700">
+                {currentAgent.builder_id ? userName(currentAgent.builder_id, users) : <span className="text-slate-300">Unassigned</span>}
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+          <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Details</p>
+          <div className="space-y-3">
+            <div>
+              <p className="text-[10px] text-slate-400 font-semibold mb-0.5">Description</p>
+              <p className="text-sm text-slate-600">{currentAgent.description || <span className="text-slate-300 italic">No description</span>}</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-slate-400 font-semibold mb-0.5">Business justification</p>
+              <p className="text-sm text-slate-600">{currentAgent.business_justification || <span className="text-slate-300 italic">None provided</span>}</p>
+            </div>
+            {currentAgent.notes && (
+              <div>
+                <p className="text-[10px] text-slate-400 font-semibold mb-0.5">Notes</p>
+                <p className="text-sm text-slate-600 whitespace-pre-wrap">{currentAgent.notes}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* History */}
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+        <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Status History</p>
+        {agentHistory.length === 0 ? (
+          <p className="text-sm text-slate-400">No status changes recorded yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {agentHistory.map(h=>(
+              <div key={h.id} className="flex gap-3 items-start">
+                <div className="w-1.5 h-1.5 rounded-full bg-sia-teal flex-shrink-0 mt-1.5"/>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-semibold text-slate-700">
+                    <StatusBadge status={h.from}/> <span className="text-slate-400">→</span> <StatusBadge status={h.to}/>
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    by {h.user_name} · {new Date(h.date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
+                  </div>
+                  {h.comment && <div className="text-xs text-slate-500 mt-1 italic">"{h.comment}"</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Documents */}
+      <DocumentsSection
+        agentId={id}
+        user={user}
+        canEdit={canEdit}
+        isBuilder={isBuilder}
+      />
+    </div>
+  );
+}
+
+/* ── MY AGENTS PAGE ─────────────────────────────────────────────────── */
+function MyAgentsPage({user}) {
+  const [agents, setAgents] = useState(getAgents() || []);
+  const users = getUsers() || [];
+  const [history, setHistory] = useState(getHistory());
+
+  if (!user) return null;
+
+  let myAgents;
+  if (user.role === 'builder' || user.role === 'admin') {
+    myAgents = agents.filter(a => a.builder_id === user.id);
+  } else {
+    myAgents = agents.filter(a => a.requestor_id === user.id);
+  }
+
+  const NEXT_STATUS = {to_be_started:'in_building', in_building:'built', built:'requestor_testing', requestor_testing:'tested', tested:'live'};
+
+  function advance(agent) {
+    const next = NEXT_STATUS[agent.build_status];
+    if (!next) return;
+    const updated = agents.map(a => a.id===agent.id ? {...a,build_status:next} : a);
+    saveAgents(updated);
+    const h = [...history, {
+      id:Date.now(), agent_id:agent.id, from:agent.build_status, to:next,
+      user_id:user.id, user_name:user.name, comment:'', date:new Date().toISOString()
+    }];
+    saveHistory(h);
+    setAgents(updated);
+    setHistory(h);
+    showToast(`Status advanced to "${STATUS_CFG[next].label}"`);
+  }
+
+  const isBuilderOrAdmin = user.role === 'builder' || user.role === 'admin';
+
+  return (
+    <div className="space-y-4">
+      <h1 className="text-xl font-extrabold text-slate-800">My Agents <span className="text-slate-400 font-normal text-base">({myAgents.length})</span></h1>
+      {myAgents.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-10 text-center">
+          <p className="text-slate-400 text-sm">No agents assigned to you.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {myAgents.map(a => {
+            const next = NEXT_STATUS[a.build_status];
+            return (
+              <div key={a.id} className="bg-white rounded-xl border border-slate-100 shadow-sm px-5 py-4 flex items-center gap-4 flex-wrap">
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold text-slate-800 text-sm cursor-pointer hover:text-sia-teal truncate"
+                       onClick={()=>navigate(`#/agents/${a.id}`)}>{a.name}</div>
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    <StatusBadge status={a.build_status}/>
+                    <PriorityBadge priority={a.priority}/>
+                    {isBuilderOrAdmin && <span className="text-xs text-slate-400">Req: {userName(a.requestor_id, users)}</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {a.siagpt_link && (
+                    <a href={a.siagpt_link} target="_blank" rel="noopener noreferrer"
+                       className="text-sia-teal text-xs font-medium flex items-center gap-1 hover:underline">
+                      SiaGPT <IconExtLink size={11}/>
+                    </a>
+                  )}
+                  {isBuilderOrAdmin && next && (
+                    <button onClick={()=>advance(a)}
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-sia-navy text-white hover:bg-sia-mid transition-colors">
+                      → {STATUS_CFG[next].label}
+                    </button>
+                  )}
+                  <button onClick={()=>navigate(`#/agents/${a.id}`)}
+                          className="text-slate-400 hover:text-slate-700">
+                    <IconChevron size={16} dir="right"/>
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── BACKLOG PAGE ────────────────────────────────────────────────────── */
+function BacklogPage({user}) {
+  const [agents, setAgents] = useState(getAgents() || []);
+  const users = getUsers() || [];
+  const [assignTarget, setAssignTarget] = useState({});
+
+  const isAdmin = user?.role === 'admin';
+  const isBuilder = user?.role === 'builder';
+  const builders = users.filter(u => ['builder','admin'].includes(u.role));
+
+  const backlog = agents.filter(a => a.validation_status === 'approved' && !a.builder_id);
+
+  function assign(agent, builderId) {
+    const assignee = users.find(u => u.id === builderId);
+    const updated = agents.map(a => a.id===agent.id ? {...a, builder_id:builderId, build_status:'to_be_started'} : a);
+    saveAgents(updated);
+    setAgents(updated);
+    showToast(builderId === user.id ? `You're now building "${agent.name}"` : `Assigned to ${assignee?.name}`);
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-xl font-extrabold text-slate-800">Build Backlog</h1>
+        <p className="text-sm text-slate-500 mt-1">
+          Approved agents without a builder.
+          {isAdmin ? ' Self-assign or assign any builder.' : ' Self-assign to start building.'}
+        </p>
+      </div>
+      {backlog.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-10 text-center">
+          <p className="text-slate-400 text-sm">Backlog is empty — all approved agents have a builder.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {backlog.map(a => (
+            <div key={a.id} className="bg-white rounded-xl border border-slate-100 shadow-sm px-5 py-4 flex items-center gap-4 flex-wrap">
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold text-slate-800 text-sm cursor-pointer hover:text-sia-teal truncate"
+                     onClick={()=>navigate(`#/agents/${a.id}`)}>{a.name}</div>
+                <div className="flex items-center gap-2 mt-1 flex-wrap">
+                  <PriorityBadge priority={a.priority}/>
+                  <span className="text-xs text-slate-400">Requested by {userName(a.requestor_id, users)}</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
+                {/* Self-assign: available to both builders and admins */}
+                {(isBuilder || isAdmin) && (
+                  <button onClick={()=>assign(a, user.id)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-sia-teal text-white hover:bg-sia-navy transition-colors">
+                    Self-assign
+                  </button>
+                )}
+                {/* Assign to builder: admin only */}
+                {isAdmin && (
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={assignTarget[a.id] || ''}
+                      onChange={e => setAssignTarget({...assignTarget, [a.id]: parseInt(e.target.value)})}
+                      className="border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-sia-teal/30 bg-white">
+                      <option value="">Assign to…</option>
+                      {builders.filter(b => b.id !== user.id).map(b => (
+                        <option key={b.id} value={b.id}>{b.name}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={()=>{ if(assignTarget[a.id]) assign(a, assignTarget[a.id]); }}
+                      disabled={!assignTarget[a.id]}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-sia-navy text-sia-navy hover:bg-sia-navy hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
+                      Assign
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── VALIDATION QUEUE PAGE ───────────────────────────────────────────── */
+function ValidationQueuePage({user}) {
+  const [agents, setAgents] = useState(getAgents() || []);
+  const users = getUsers() || [];
+  const [comments, setComments] = useState({});
+  const [checklist, setChecklist] = useState({});
+
+  const LIVE_CHECKS = [
+    {key:'tested',    label:'Agent has been tested by the requestor'},
+    {key:'docs',      label:'Documentation or description is complete'},
+    {key:'security',  label:'No sensitive data or security concerns identified'},
+    {key:'scope',     label:'Scope and expected users are clearly defined'},
+  ];
+
+  // New agent intake (initial approval gate)
+  const pendingIntake = agents.filter(a => a.validation_status === 'pending');
+  // Pre-live quality gate (builder submitted for live, awaiting admin/validator)
+  const pendingLive = agents.filter(a => a.live_approval_pending === true);
+
+  function decideIntake(agent, decision) {
+    const updated = agents.map(a => a.id===agent.id ? {...a, validation_status:decision} : a);
+    saveAgents(updated);
+    setAgents(updated);
+    showToast(`Agent ${decision === 'approved' ? 'approved for build' : 'rejected'}`);
+  }
+
+  function decideLive(agent, decision) {
+    const patch = decision === 'approved'
+      ? {build_status:'live', live_approval_pending:false}
+      : {live_approval_pending:false};
+    const updated = agents.map(a => a.id===agent.id ? {...a, ...patch} : a);
+    saveAgents(updated);
+    setAgents(updated);
+    showToast(decision === 'approved' ? 'Agent is now live!' : 'Live request rejected');
+  }
+
+  function allChecked(agentId) {
+    const c = checklist[agentId] || {};
+    return LIVE_CHECKS.every(ch => c[ch.key]);
+  }
+
+  function toggleCheck(agentId, key) {
+    const prev = checklist[agentId] || {};
+    setChecklist({...checklist, [agentId]: {...prev, [key]: !prev[key]}});
+  }
+
+  function AgentCard({a, borderColor, children}) {
+    return (
+      <div className="bg-white rounded-xl border shadow-sm p-5" style={{borderColor}}>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex-1 min-w-0">
+            <a href={`#/agents/${a.id}`} className="font-bold text-slate-800 hover:text-sia-teal">{a.name}</a>
+            <div className="flex gap-2 mt-1.5 flex-wrap">
+              <PriorityBadge priority={a.priority}/>
+              <StatusBadge status={a.build_status}/>
+              <span className="text-xs text-slate-400">by {userName(a.requestor_id, users)}</span>
+            </div>
+            {a.description && <p className="text-xs text-slate-500 mt-2">{a.description}</p>}
+            {a.business_justification && <p className="text-xs text-slate-400 mt-1 italic">{a.business_justification}</p>}
+            {a.use_case_category && <p className="text-xs text-slate-400 mt-0.5">Category: {a.use_case_category} {a.business_unit ? `· ${a.business_unit}` : ''}</p>}
+            {a.testers && a.testers.length > 0 && (
+              <p className="text-xs text-slate-400 mt-0.5">Testers: {a.testers.map(tid=>userName(tid,users)).join(', ')}</p>
+            )}
+          </div>
+        </div>
+        {children}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-xl font-extrabold text-slate-800">Validation Queue</h1>
+        <p className="text-sm text-slate-500 mt-1">Review new agent requests and approve agents for live deployment.</p>
+      </div>
+
+      {/* Section 1: Pre-live quality gate */}
+      <div className="space-y-3">
+        <h2 className="text-sm font-bold text-slate-600 uppercase tracking-wider flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-amber-400 inline-block"/>
+          Awaiting Live Approval ({pendingLive.length})
+        </h2>
+        {pendingLive.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 text-center">
+            <p className="text-slate-400 text-sm">No agents pending live approval.</p>
+          </div>
+        ) : pendingLive.map(a => (
+          <AgentCard key={a.id} a={a} borderColor="#fcd34d">
+            {/* Quality checklist */}
+            <div className="mt-4 p-3 bg-amber-50 rounded-lg border border-amber-100 space-y-2">
+              <p className="text-xs font-bold text-amber-700 uppercase tracking-wider mb-1">Quality checklist</p>
+              {LIVE_CHECKS.map(ch=>(
+                <label key={ch.key} className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox"
+                         checked={!!(checklist[a.id]||{})[ch.key]}
+                         onChange={()=>toggleCheck(a.id, ch.key)}
+                         className="rounded"/>
+                  <span className="text-xs text-slate-700">{ch.label}</span>
+                </label>
+              ))}
+            </div>
+            <div className="mt-3">
+              <textarea value={comments[`live_${a.id}`]||''}
+                        onChange={e=>setComments({...comments,[`live_${a.id}`]:e.target.value})}
+                        placeholder="Decision rationale (optional)…" rows={2}
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-sia-teal/30 resize-none"/>
+              <div className="flex gap-2 mt-2">
+                <button onClick={()=>decideLive(a,'approved')}
+                        disabled={!allChecked(a.id)}
+                        className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                  Approve &amp; Go Live
+                </button>
+                <button onClick={()=>decideLive(a,'rejected')}
+                        className="px-4 py-2 rounded-lg bg-red-100 text-red-700 text-xs font-bold hover:bg-red-200 transition-colors">
+                  Reject
+                </button>
+              </div>
+              {!allChecked(a.id) && <p className="text-[10px] text-amber-600 mt-1">Complete all checklist items to approve.</p>}
+            </div>
+          </AgentCard>
+        ))}
+      </div>
+
+      {/* Section 2: New agent intake */}
+      <div className="space-y-3">
+        <h2 className="text-sm font-bold text-slate-600 uppercase tracking-wider flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-blue-400 inline-block"/>
+          New Agent Requests ({pendingIntake.length})
+        </h2>
+        {pendingIntake.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 text-center">
+            <p className="text-slate-400 text-sm">No new agent requests pending.</p>
+          </div>
+        ) : pendingIntake.map(a => (
+          <AgentCard key={a.id} a={a} borderColor="#bfdbfe">
+            <div className="mt-4">
+              <textarea value={comments[a.id]||''} onChange={e=>setComments({...comments,[a.id]:e.target.value})}
+                        placeholder="Decision rationale (optional)…" rows={2}
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-sia-teal/30 resize-none"/>
+              <div className="flex gap-2 mt-2">
+                <button onClick={()=>decideIntake(a,'approved')}
+                        className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 transition-colors">
+                  Approve
+                </button>
+                <button onClick={()=>decideIntake(a,'rejected')}
+                        className="px-4 py-2 rounded-lg bg-red-100 text-red-700 text-xs font-bold hover:bg-red-200 transition-colors">
+                  Reject
+                </button>
+              </div>
+            </div>
+          </AgentCard>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── REQUEST AGENT MODAL ────────────────────────────────────────────── */
+function RequestAgentModal({user, onClose, onSubmitted}) {
+  const allUsers = getUsers() || [];
+  const [form, setForm] = useState({
+    name:'', description:'', business_justification:'', priority:'medium',
+    business_unit:'', use_case_category:'', expected_users:'', target_date:'',
+    success_criteria:'', testers:[],
+  });
+  const [nameError, setNameError] = useState('');
+  const [duplicates, setDuplicates] = useState([]);
+  const [duplicateConfirmed, setDuplicateConfirmed] = useState(false);
+  const [requestorTested, setRequestorTested] = useState(false);
+
+  const BUS_UNITS = ['FSI','Technology','Change Management','Operations','Strategy','Other'];
+  const USE_CASES = ['Automation','Research & Analysis','Communication','Reporting','Data Processing','Other'];
+
+  // Fuzzy duplicate detection — Levenshtein-based similarity
+  function similarity(a, b) {
+    a = a.toLowerCase().trim(); b = b.toLowerCase().trim();
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    if (b.includes(a) || a.includes(b)) return 0.85;
+    const longer = a.length > b.length ? a : b;
+    const shorter = a.length > b.length ? b : a;
+    const costs = Array.from({length:shorter.length+1},(_,i)=>i);
+    for (let i=1; i<=longer.length; i++) {
+      let prev = i;
+      for (let j=1; j<=shorter.length; j++) {
+        const val = longer[i-1]===shorter[j-1] ? costs[j-1] : Math.min(costs[j-1],costs[j],prev)+1;
+        costs[j-1] = prev; prev = val;
+      }
+      costs[shorter.length] = prev;
+    }
+    return (longer.length - costs[shorter.length]) / longer.length;
+  }
+
+  function checkDuplicates(name) {
+    if (!name.trim()) { setDuplicates([]); return; }
+    const agents = getAgents() || [];
+    const found = agents.filter(a => similarity(name, a.name) >= 0.65);
+    setDuplicates(found);
+    if (found.length > 0) setDuplicateConfirmed(false);
+  }
+
+  function toggleTester(uid) {
+    setForm(f => ({...f, testers: f.testers.includes(uid) ? f.testers.filter(t=>t!==uid) : [...f.testers, uid]}));
+  }
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!form.name.trim()) { setNameError('Agent name is required'); return; }
+    if (duplicates.length > 0 && !duplicateConfirmed) { return; }
+    if (!requestorTested) { return; }
+    const agents = getAgents() || [];
+    const maxId = agents.reduce((m,a) => Math.max(m, a.id||0), 0);
+    const now = new Date().toISOString();
+    const newAgent = {
+      id: maxId + 1,
+      name: form.name.trim(),
+      description: form.description.trim(),
+      business_justification: form.business_justification.trim(),
+      priority: form.priority,
+      business_unit: form.business_unit,
+      use_case_category: form.use_case_category,
+      expected_users: form.expected_users,
+      target_date: form.target_date,
+      success_criteria: form.success_criteria.trim(),
+      testers: form.testers,
+      build_status: 'to_be_started',
+      validation_status: 'pending',
+      requestor_id: user.id,
+      builder_id: null,
+      siagpt_link: null,
+      created_at: now, updated_at: now,
+    };
+    saveAgents([...agents, newAgent]);
+    showToast('Request submitted — a validator will review it shortly');
+    onClose();
+    if (onSubmitted) onSubmitted();
+  }
+
+  function onBackdrop(e) { if (e.target === e.currentTarget) onClose(); }
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const inputCls = "w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30";
+  const selectCls = inputCls + " bg-white";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+         style={{background:'rgba(0,0,0,0.55)'}} onClick={onBackdrop}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col overflow-hidden max-h-[90vh]">
+        {/* Header */}
+        <div className="px-6 py-5 flex items-center justify-between flex-shrink-0"
+             style={{background:'linear-gradient(135deg,#00205B 0%,#009DC4 100%)'}}>
+          <h2 className="text-base font-extrabold text-white tracking-tight">Request a new agent</h2>
+          <button onClick={onClose} className="text-white/60 hover:text-white transition-colors"><IconX size={18}/></button>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4 overflow-y-auto flex-1">
+
+          {/* Agent name + duplicate detection */}
+          <div>
+            <label className="text-xs font-bold text-slate-600 block mb-1">
+              Agent name <span className="text-red-500">*</span>
+            </label>
+            <input value={form.name}
+                   onChange={e=>{ setForm({...form,name:e.target.value}); setNameError(''); checkDuplicates(e.target.value); }}
+                   placeholder="e.g. AML Screening Agent" className={inputCls}/>
+            {nameError && <p className="text-xs text-red-500 mt-1">{nameError}</p>}
+            {duplicates.length > 0 && (
+              <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                <p className="text-xs font-bold text-amber-700 mb-1">Similar agent{duplicates.length>1?'s':''} already exist:</p>
+                {duplicates.map(d=>(
+                  <div key={d.id} className="flex items-center gap-2 mb-1">
+                    <StatusBadge status={d.build_status}/>
+                    <a href={`#/agents/${d.id}`} target="_blank" rel="noopener noreferrer"
+                       className="text-xs text-sia-teal underline font-medium">{d.name}</a>
+                  </div>
+                ))}
+                <label className="flex items-center gap-2 mt-2 cursor-pointer">
+                  <input type="checkbox" checked={duplicateConfirmed} onChange={e=>setDuplicateConfirmed(e.target.checked)}/>
+                  <span className="text-xs text-amber-800 font-semibold">I confirm this is not a duplicate and want to proceed</span>
+                </label>
+              </div>
+            )}
+          </div>
+
+          {/* Description */}
+          <div>
+            <label className="text-xs font-bold text-slate-600 block mb-1">Description <span className="text-red-500">*</span></label>
+            <textarea value={form.description} onChange={e=>setForm({...form,description:e.target.value})}
+                      placeholder="What will this agent do?" rows={3} className={inputCls + " resize-none"} required/>
+          </div>
+
+          {/* Business justification */}
+          <div>
+            <label className="text-xs font-bold text-slate-600 block mb-1">Business justification</label>
+            <textarea value={form.business_justification} onChange={e=>setForm({...form,business_justification:e.target.value})}
+                      placeholder="Why is it needed? What problem does it solve?" rows={2} className={inputCls + " resize-none"}/>
+          </div>
+
+          {/* Business unit + Use case category */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-bold text-slate-600 block mb-1">Business unit</label>
+              <select value={form.business_unit} onChange={e=>setForm({...form,business_unit:e.target.value})} className={selectCls}>
+                <option value="">Select…</option>
+                {BUS_UNITS.map(u=><option key={u} value={u}>{u}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-600 block mb-1">Use case category</label>
+              <select value={form.use_case_category} onChange={e=>setForm({...form,use_case_category:e.target.value})} className={selectCls}>
+                <option value="">Select…</option>
+                {USE_CASES.map(c=><option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {/* Expected users + Target date */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-bold text-slate-600 block mb-1">Expected users</label>
+              <input type="number" min="1" value={form.expected_users}
+                     onChange={e=>setForm({...form,expected_users:e.target.value})}
+                     placeholder="e.g. 50" className={inputCls}/>
+            </div>
+            <div>
+              <label className="text-xs font-bold text-slate-600 block mb-1">Target go-live date</label>
+              <input type="date" value={form.target_date}
+                     onChange={e=>setForm({...form,target_date:e.target.value})}
+                     className={inputCls}/>
+            </div>
+          </div>
+
+          {/* Success criteria */}
+          <div>
+            <label className="text-xs font-bold text-slate-600 block mb-1">Success criteria</label>
+            <textarea value={form.success_criteria} onChange={e=>setForm({...form,success_criteria:e.target.value})}
+                      placeholder="How will we know this agent is working well?" rows={2} className={inputCls + " resize-none"}/>
+          </div>
+
+          {/* Priority */}
+          <div>
+            <label className="text-xs font-bold text-slate-600 block mb-2">Priority</label>
+            <div className="flex gap-2 flex-wrap">
+              {Object.entries(PRIORITY_CFG).map(([k,v])=>(
+                <button key={k} type="button" onClick={()=>setForm({...form,priority:k})}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all"
+                        style={form.priority===k ? {color:v.color,background:v.bg,borderColor:v.color} : {color:'#64748b',background:'#fff',borderColor:'#e2e8f0'}}>
+                  {v.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Tester selection */}
+          <div>
+            <label className="text-xs font-bold text-slate-600 block mb-1">Assign testers</label>
+            <p className="text-[10px] text-slate-400 mb-2">Select who should test this agent before it goes live.</p>
+            <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-36 overflow-y-auto">
+              {allUsers.filter(u=>u.id !== user.id).map(u=>(
+                <label key={u.id} className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-slate-50">
+                  <input type="checkbox" checked={form.testers.includes(u.id)} onChange={()=>toggleTester(u.id)} className="rounded"/>
+                  <span className="text-sm text-slate-700 flex-1">{u.name}</span>
+                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded" style={{color:ROLE_COLORS[u.role],background:'#f8fafc'}}>{u.role}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Mandatory requestor testing confirmation */}
+          <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" className="mt-0.5 rounded" checked={requestorTested}
+                     onChange={e=>setRequestorTested(e.target.checked)}/>
+              <span className="text-xs text-blue-900 font-semibold leading-snug">
+                I confirm I have personally tested a prototype or similar version of this agent concept, or I commit to testing it during the build phase before it advances to "Tested" status.
+              </span>
+            </label>
+          </div>
+
+          {/* Actions */}
+          <div className="flex gap-3 pt-1">
+            <button type="submit"
+                    disabled={!requestorTested || (duplicates.length > 0 && !duplicateConfirmed)}
+                    className="flex-1 py-2.5 rounded-xl text-sm font-bold text-white transition-opacity hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                    style={{background:'linear-gradient(135deg,#00205B 0%,#009DC4 100%)'}}>
+              Submit request
+            </button>
+            <button type="button" onClick={onClose}
+                    className="px-5 py-2.5 rounded-xl text-sm font-semibold border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors">
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* ── IMPORT PAGE ─────────────────────────────────────────────────────── */
+function ImportPage({user}) {
+  const [dragOver, setDragOver] = useState(false);
+  const [result, setResult] = useState(null);
+  const [processing, setProcessing] = useState(false);
+  const fileInputRef = useRef(null);
+
+  function resolveHeader(raw) {
+    const norm = (raw||'').toString().toLowerCase().trim();
+    for (const [field, aliases] of Object.entries(COL_MAP)) {
+      if (aliases.includes(norm)) return field;
+    }
+    return null;
+  }
+
+  function processWorkbook(wb) {
+    const sheetName = wb.SheetNames[0];
+    const ws = wb.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+    if (rows.length < 2) { showToast('Sheet appears empty'); return; }
+
+    const headers = rows[0].map(h => resolveHeader(h));
+    const agents = getAgents() || [];
+    const maxId = agents.reduce((m,a) => Math.max(m, a.id||0), 0);
+    let added = 0, updated = 0;
+    let nextId = maxId + 1;
+
+    const updated_agents = [...agents];
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const record = {};
+      headers.forEach((field, idx) => {
+        if (field) record[field] = (row[idx]||'').toString().trim();
+      });
+
+      if (!record.name) continue;
+
+      // Normalize priority
+      if (record.priority) {
+        const p = record.priority.toLowerCase();
+        record.priority = VALID_PRIORITIES.includes(p) ? p : 'medium';
+      } else {
+        record.priority = 'medium';
+      }
+
+      // Normalize build_status
+      if (record.build_status) {
+        const s = record.build_status.toLowerCase().replace(/ /g,'_');
+        record.build_status = VALID_BUILD_STATUSES.includes(s) ? s : 'to_be_started';
+      } else {
+        record.build_status = 'to_be_started';
+      }
+
+      const existingIdx = updated_agents.findIndex(
+        a => a.name.toLowerCase().trim() === record.name.toLowerCase()
+      );
+
+      if (existingIdx >= 0) {
+        updated_agents[existingIdx] = {
+          ...updated_agents[existingIdx],
+          priority: record.priority || updated_agents[existingIdx].priority,
+          build_status: record.build_status || updated_agents[existingIdx].build_status,
+          description: record.description !== undefined ? record.description : updated_agents[existingIdx].description,
+          business_justification: record.business_justification !== undefined ? record.business_justification : updated_agents[existingIdx].business_justification,
+          siagpt_link: record.siagpt_link || updated_agents[existingIdx].siagpt_link,
+        };
+        updated++;
+      } else {
+        updated_agents.push({
+          id: nextId++,
+          name: record.name,
+          description: record.description || '',
+          business_justification: record.business_justification || '',
+          priority: record.priority,
+          build_status: record.build_status,
+          siagpt_link: record.siagpt_link || null,
+          requestor_id: user.id,
+          builder_id: null,
+          validation_status: 'approved',
+        });
+        added++;
+      }
+    }
+
+    saveAgents(updated_agents);
+    setResult({added, updated});
+    showToast(`Import complete: ${added} added, ${updated} updated`);
+  }
+
+  function handleFile(file) {
+    if (!file) return;
+    setProcessing(true);
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const wb = XLSX.read(data, {type:'array'});
+        processWorkbook(wb);
+      } catch(err) {
+        showToast('Failed to parse file');
+      }
+      setProcessing(false);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function onDrop(e) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    handleFile(file);
+  }
+
+  function downloadTemplate() {
+    const headers = ['Name','Description','Business Justification','Priority','Build Status','SiaGPT Link'];
+    const example = ['Example Agent','Automates X process','Reduces manual effort by 80%','high','to_be_started','https://app.siagpt.ai/...'];
+    const ws = XLSX.utils.aoa_to_sheet([headers, example]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Agents');
+    XLSX.writeFile(wb, 'rce_agents_template.xlsx');
+  }
+
+  return (
+    <div className="space-y-6 max-w-2xl">
+      {/* Header */}
+      <div>
+        <h1 className="text-xl font-extrabold text-slate-800">Import Agents</h1>
+        <p className="text-sm text-slate-500 mt-1">Upload an Excel file to bulk-add or update agents. Existing agents are matched by name.</p>
+      </div>
+
+      {/* Drop zone */}
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 space-y-5">
+        <div
+          className={`drop-zone rounded-xl px-6 py-12 text-center cursor-pointer select-none ${dragOver ? 'dragover' : ''}`}
+          onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+          onDragLeave={()=>setDragOver(false)}
+          onDrop={onDrop}
+          onClick={()=>fileInputRef.current && fileInputRef.current.click()}
+        >
+          <input ref={fileInputRef} type="file" className="hidden"
+                 accept=".xlsx,.xls"
+                 onChange={e=>handleFile(e.target.files[0])}/>
+          <IconImport size={32} c="text-slate-300 mx-auto mb-3"/>
+          <p className="text-sm font-semibold text-slate-600">
+            {processing ? 'Processing…' : 'Drop your .xlsx / .xls file here, or click to browse'}
+          </p>
+          <p className="text-xs text-slate-400 mt-1">Only the first sheet is read. First row must be headers.</p>
+        </div>
+
+        {/* Result summary */}
+        {result && (
+          <div className="rounded-xl px-5 py-4 flex items-center gap-3"
+               style={{background:'#ecfdf5', border:'1px solid #6ee7b7'}}>
+            <IconCheck size={16} c="text-emerald-600 flex-shrink-0"/>
+            <div>
+              <p className="text-sm font-bold text-emerald-800">Import successful</p>
+              <p className="text-xs text-emerald-700 mt-0.5">
+                {result.added} agent{result.added!==1?'s':''} added, {result.updated} agent{result.updated!==1?'s':''} updated
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Download template */}
+        <div className="flex items-center justify-between flex-wrap gap-3 pt-2 border-t border-slate-100">
+          <div>
+            <p className="text-xs font-semibold text-slate-600">Need a template?</p>
+            <p className="text-xs text-slate-400">Download the Excel template with example data and correct column headers.</p>
+          </div>
+          <button onClick={downloadTemplate}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold border border-sia-teal text-sia-teal hover:bg-sia-teal hover:text-white transition-colors flex-shrink-0">
+            <IconDownload size={14}/> Download template
+          </button>
+        </div>
+      </div>
+
+      {/* Column mapping info */}
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+        <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Recognised column headers</p>
+        <div className="space-y-2">
+          {Object.entries(COL_MAP).map(([field, aliases]) => (
+            <div key={field} className="flex gap-3 text-xs">
+              <span className="font-semibold text-sia-navy w-40 flex-shrink-0">{field}</span>
+              <span className="text-slate-500">{aliases.join(', ')}</span>
+            </div>
+          ))}
+        </div>
+        <p className="text-[11px] text-slate-400 mt-3">Headers are matched case-insensitively. Extra columns are ignored.</p>
+      </div>
+    </div>
+  );
+}
+
+/* ── GOVERNANCE PAGE ─────────────────────────────────────────────────── */
+const PROCESS_STEPS = [
+  {num:'01',title:'Request',subtitle:'Requestor submits',description:'Any team member identifies a use case and fills the enhanced intake form — name, description, business justification, business unit, use case category, expected users, target date, success criteria, and assigned testers. Duplicate detection flags similar agents at submission.',owner:'Requestor',ownerColor:'#64748b',color:'#0062A3',bg:'#EFF6FF',status:null},
+  {num:'02',title:'Validation',subtitle:'Validator reviews',description:'The validator assesses feasibility, priority, and strategic fit. They approve, reject, or request additional information before any build starts.',owner:'Validator',ownerColor:'#7c3aed',color:'#7c3aed',bg:'#F5F3FF',status:null},
+  {num:'03',title:'Build',subtitle:'Builder develops',description:'A builder self-assigns from the backlog (or is assigned by an admin) and develops the agent on SiaGPT. Progress is tracked through In Building and Built stages. The SiaGPT, Claude Skill and Other links are documented once deployed.',owner:'Builder',ownerColor:'#0062A3',color:'#f59e0b',bg:'#FFFBEB',status:'IN BUILDING'},
+  {num:'04',title:'Requestor Testing',subtitle:'Requestor & testers validate',description:'Once built, the agent must be tested by the requestor and all assigned testers before it can advance. Only the requestor can confirm this stage is complete and move the agent to Tested. This is a mandatory gate — builders cannot bypass it.',owner:'Requestor',ownerColor:'#64748b',color:'#0062A3',bg:'#EFF6FF',status:'REQ. TESTING',highlight:true},
+  {num:'05',title:'Pre-live Approval',subtitle:'Admin or validator approves',description:'Before going Live, an admin or validator reviews the agent against a quality checklist: tested, documented, no security concerns, scope defined. All four items must be confirmed before Live status can be granted.',owner:'Validator',ownerColor:'#7c3aed',color:'#7c3aed',bg:'#F5F3FF',status:'APPROVAL'},
+  {num:'06',title:'Live',subtitle:'Ready for external demos',description:'The agent has passed requestor testing and the pre-live quality gate. It is cleared for internal use and external client demonstrations. It represents the highest level of maturity in the programme.',owner:'All',ownerColor:'#ca8a04',color:'#eab308',bg:'#FEFCE8',status:'LIVE'},
+];
+const ROLES_GOV = [
+  {key:'requestor',title:'Requestor',grad:'linear-gradient(135deg,#475569,#64748b)',badge:'Any team member',highlight:true,
+   responsibilities:['Identify use cases and submit requests via the enhanced intake form','Assign testers at submission — they will be notified when the agent is ready for testing','Confirm duplicate detection check: verify no similar agent exists before submitting','Personally test the agent at the Requestor Testing stage — this is mandatory before the agent can advance to Tested','Only the requestor can move the agent from Requestor Testing to Tested','Provide feedback to help the builder improve the agent over time'],
+   limits:['Cannot approve their own requests','Cannot bypass the Requestor Testing stage — builder cannot confirm it on their behalf']},
+  {key:'validator',title:'Validator',grad:'linear-gradient(135deg,#6d28d9,#7c3aed)',badge:'Approves requests & live status',
+   responsibilities:['Review all incoming agent requests for feasibility and strategic fit','Approve, reject, or request additional information with a written rationale','Approve the pre-live quality gate: confirm the agent is tested, documented, secure, and scoped before Live status is granted','Prioritise the build queue in coordination with the RCE team','Ensure agents comply with RCE guidelines and data-handling rules'],
+   limits:['Should not build agents they have validated (separation of duties)','Cannot unilaterally change build status — that belongs to the builder']},
+  {key:'builder',title:'Builder',grad:'linear-gradient(135deg,#00205B,#009DC4)',badge:'Builds the agent',
+   responsibilities:['Self-assign approved agents from the build backlog based on capacity','Develop the agent on SiaGPT and update build status throughout','Document the SiaGPT link, Claude Skill link, and any other relevant links in the tracker','Advance the agent to Requestor Testing once built — the requestor then takes over','Add Notes in the tracker to document context, edge cases, or known limitations'],
+   limits:['One builder per agent — reassignment requires admin action','Cannot advance the agent past Requestor Testing — only the requestor can confirm testing is complete']},
+  {key:'admin',title:'Admin',grad:'linear-gradient(135deg,#b45309,#d97706)',badge:'Platform oversight',
+   responsibilities:['Manage users, roles, and team assignments across the platform','Import and maintain the master agent inventory via Excel','Self-assign or assign any builder to agents in the backlog','Approve the pre-live quality gate alongside validators','Override or correct data quality issues in the tracker','Monitor programme health via the dashboard and reporting'],
+   limits:['Admin actions are logged — all changes to agents are traceable']},
+];
+const PRINCIPLES_GOV = [
+  {icon:'🧪',title:'Requestor must test',body:'Testing is not optional. The requestor — and all testers assigned at intake — must validate the agent before it can advance past Requestor Testing. Only the requestor can confirm this stage is complete.'},
+  {icon:'✅',title:'Two validation gates',body:'There are two formal approval points: (1) a validator approves the request before any build starts; (2) an admin or validator approves the pre-live quality checklist before Live status is granted.'},
+  {icon:'👤',title:'One builder per agent',body:'Each approved agent has exactly one assigned builder at any time. Single ownership ensures clarity and prevents duplicated or conflicting work.'},
+  {icon:'📋',title:'Self-assignment model',body:'Builders pull work from the backlog themselves. Admins can also assign builders directly. This respects capacity and expertise.'},
+  {icon:'🔗',title:'Links must be documented',body:'An agent is only considered live when its deployment links (SiaGPT, Claude Skill, or other) are documented in the tracker. This ensures all deployments are discoverable by the team.'},
+  {icon:'📝',title:'Full audit trail',body:'Every status change, validation decision, assignment, and testing confirmation is logged with the actor and timestamp. The tracker is the single source of truth.'},
+];
+
+function GovernancePage() {
+  return (
+    <div className="space-y-8 max-w-5xl">
+      {/* Header */}
+      <div className="rounded-3xl px-7 py-7 text-white relative overflow-hidden"
+           style={{background:'linear-gradient(135deg,#001540 0%,#00205B 50%,#0062A3 80%,#009DC4 100%)'}}>
+        <div className="absolute inset-0 pointer-events-none"
+             style={{backgroundImage:'linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px)',backgroundSize:'32px 32px'}}/>
+        <div className="relative z-10">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-2">Sia · FSI &amp; Tech BUs</p>
+          <h1 className="text-2xl font-extrabold tracking-tight mb-1">Governance Framework</h1>
+          <p className="text-white/55 text-sm max-w-xl">How agent requests flow from idea to live deployment — and who is responsible at each step.</p>
+        </div>
+      </div>
+
+      {/* Process flow */}
+      <section>
+        <h2 className="text-base font-bold text-slate-800 mb-1 flex items-center gap-2">
+          <span className="w-1 h-4 rounded-full inline-block" style={{background:'linear-gradient(#00205B,#009DC4)'}}/>
+          End-to-end process
+        </h2>
+        <p className="text-xs text-slate-400 mb-5 ml-3">Follow steps 01 → 06. Steps 04 and 05 are mandatory gates — neither can be bypassed.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {PROCESS_STEPS.map((step, i) => (
+            <div key={step.num}
+                 className={`bg-white rounded-2xl border flex flex-col overflow-hidden transition-shadow hover:shadow-md ${step.highlight ? 'border-[#0062A3]/40 ring-1 ring-[#0062A3]/20' : 'border-slate-100'}`}>
+              {/* Coloured top bar */}
+              <div className="h-1.5 w-full" style={{background:step.color}}/>
+              <div className="px-5 py-4 flex flex-col flex-1">
+                {/* Step number + owner + status */}
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-black text-white flex-shrink-0"
+                        style={{background:step.color}}>
+                    {step.num}
+                  </span>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white" style={{background:step.ownerColor}}>
+                    {step.owner}
+                  </span>
+                  {step.status && (
+                    <span className="ml-auto text-[9px] font-bold px-2 py-0.5 rounded-full border flex-shrink-0"
+                          style={{color:step.color, borderColor:step.color, background:step.bg}}>
+                      {step.status}
+                    </span>
+                  )}
+                </div>
+                {/* Title + subtitle */}
+                <p className="text-sm font-extrabold text-slate-800 leading-tight">{step.title}</p>
+                <p className="text-[11px] font-semibold mt-0.5 mb-2" style={{color:step.color}}>{step.subtitle}</p>
+                {/* Description */}
+                <p className="text-xs text-slate-500 leading-relaxed flex-1">{step.description}</p>
+                {/* Mandatory gate badge */}
+                {step.highlight && (
+                  <div className="mt-3 flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1.5 rounded-lg self-start"
+                       style={{background:'#EFF6FF', color:'#0062A3'}}>
+                    <span>⚠</span> Mandatory gate — cannot be bypassed
+                  </div>
+                )}
+              </div>
+              {/* Footer: flow indicator */}
+              {i < PROCESS_STEPS.length - 1 && (
+                <div className="px-5 pb-3 flex items-center gap-1 text-[10px] text-slate-300 font-semibold">
+                  <span>continues to</span>
+                  <span className="font-black" style={{color:PROCESS_STEPS[i+1].color}}>
+                    {String(i+2).padStart(2,'0')} {PROCESS_STEPS[i+1].title}
+                  </span>
+                  <IconArrow size={10} c="text-slate-300"/>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Roles */}
+      <section>
+        <h2 className="text-base font-bold text-slate-800 mb-4 flex items-center gap-2">
+          <span className="w-1 h-4 rounded-full inline-block" style={{background:'linear-gradient(#00205B,#009DC4)'}}/>
+          Roles &amp; responsibilities
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {ROLES_GOV.map(role=>(
+            <div key={role.key} className={`bg-white rounded-2xl border overflow-hidden ${role.highlight?'border-[#009DC4]/40 ring-1 ring-[#009DC4]/20':'border-slate-100'}`}>
+              <div className="px-5 py-4 flex items-center gap-3" style={{background:role.grad}}>
+                <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center flex-shrink-0 text-white font-bold text-sm">
+                  {role.title[0]}
+                </div>
+                <div>
+                  <p className="text-base font-extrabold text-white leading-none">{role.title}</p>
+                  <p className="text-[11px] text-white/60 mt-0.5">{role.badge}</p>
+                </div>
+                {role.highlight && <span className="ml-auto text-[9px] font-bold bg-white/20 text-white px-2 py-1 rounded-full uppercase tracking-wider">Must confirm testing</span>}
+              </div>
+              <div className="px-5 py-4">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Responsibilities</p>
+                <ul className="space-y-2">
+                  {role.responsibilities.map((r,i)=>(
+                    <li key={i} className="flex items-start gap-2 text-xs text-slate-600 leading-relaxed">
+                      <span className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0" style={{background:'#009DC4'}}/>
+                      {r}
+                    </li>
+                  ))}
+                </ul>
+                {role.limits.length > 0 && (
+                  <>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-4 mb-2">Constraints</p>
+                    <ul className="space-y-1.5">
+                      {role.limits.map((l,i)=>(
+                        <li key={i} className="flex items-start gap-2 text-xs text-slate-400 leading-relaxed">
+                          <span className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 bg-slate-200"/>
+                          {l}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Principles */}
+      <section>
+        <h2 className="text-base font-bold text-slate-800 mb-4 flex items-center gap-2">
+          <span className="w-1 h-4 rounded-full inline-block" style={{background:'linear-gradient(#00205B,#009DC4)'}}/>
+          Key principles
+        </h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {PRINCIPLES_GOV.map((p,i)=>(
+            <div key={i} className="bg-white rounded-xl border border-slate-100 p-4 hover:border-[#009DC4]/30 transition-colors">
+              <div className="text-2xl mb-2">{p.icon}</div>
+              <p className="text-sm font-bold text-slate-800 mb-1.5">{p.title}</p>
+              <p className="text-xs text-slate-500 leading-relaxed">{p.body}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Footer note */}
+      <div className="rounded-xl bg-[#E0F5FA] border border-[#009DC4]/20 px-5 py-4 flex items-start gap-3">
+        <IconGov size={16} c="text-[#009DC4] flex-shrink-0 mt-0.5"/>
+        <p className="text-xs text-[#007FA3] leading-relaxed">
+          This governance framework applies to all AI agents developed jointly by the FSI and Tech BUs. For exceptions or questions about scope, contact the programme admin. All decisions are logged and traceable in the tracker.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ── TEAM PAGE ───────────────────────────────────────────────────────── */
+const ROLE_BADGE_CFG = {
+  admin:     {label:'Admin',     cls:'bg-[#00205B] text-white'},
+  builder:   {label:'Builder',   cls:'bg-[#009DC4] text-white'},
+  validator: {label:'Validator', cls:'bg-purple-600 text-white'},
+  requestor: {label:'Requestor', cls:'bg-slate-200 text-slate-700'},
+};
+
+function RoleBadge({role}) {
+  const cfg = ROLE_BADGE_CFG[role] || {label:role, cls:'bg-slate-200 text-slate-700'};
+  return (
+    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${cfg.cls}`}>{cfg.label}</span>
+  );
+}
+
+function TeamPage({user}) {
+  const [users, setUsers] = useState(getUsers() || []);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [newForm, setNewForm] = useState({name:'', email:'', role:'requestor'});
+  const [newError, setNewError] = useState('');
+
+  function reload() { setUsers(getUsers() || []); }
+
+  function toggleActive(u) {
+    const updated = users.map(x => x.id === u.id ? {...x, active: x.active === false ? true : false} : x);
+    saveUsers(updated);
+    setUsers(updated);
+    showToast(`${u.name} ${u.active === false ? 'reactivated' : 'deactivated'}`);
+  }
+
+  function startEdit(u) {
+    setEditingId(u.id);
+    setEditForm({name: u.name, email: u.email, role: u.role});
+  }
+
+  function cancelEdit() { setEditingId(null); setEditForm({}); }
+
+  function saveEdit(u) {
+    if (!editForm.name.trim() || !editForm.email.trim()) {
+      showToast('Name and email are required'); return;
+    }
+    if (u.id === user.id && editForm.role !== 'admin') {
+      if (!window.confirm('You are changing your own role away from admin. You will lose admin access. Continue?')) return;
+    }
+    const updated = users.map(x => x.id === u.id ? {...x, name:editForm.name.trim(), email:editForm.email.trim(), role:editForm.role} : x);
+    saveUsers(updated);
+    setUsers(updated);
+    setEditingId(null);
+    showToast('User updated');
+  }
+
+  function removeUser(u) {
+    if (u.id === user.id) { showToast('You cannot remove yourself'); return; }
+    if (!window.confirm(`Remove ${u.name} from the team? This cannot be undone.`)) return;
+    const updated = users.filter(x => x.id !== u.id);
+    saveUsers(updated);
+    setUsers(updated);
+    showToast(`${u.name} removed`);
+  }
+
+  function addUser(e) {
+    e.preventDefault();
+    setNewError('');
+    if (!newForm.name.trim()) { setNewError('Name is required'); return; }
+    if (!newForm.email.trim()) { setNewError('Email is required'); return; }
+    const maxId = users.reduce((m, u) => Math.max(m, u.id || 0), 0);
+    const newUser = {id: maxId + 1, name: newForm.name.trim(), email: newForm.email.trim(), role: newForm.role, active: true};
+    const updated = [...users, newUser];
+    saveUsers(updated);
+    setUsers(updated);
+    setNewForm({name:'', email:'', role:'requestor'});
+    showToast(`${newUser.name} added to the team`);
+  }
+
+  const roleOrder = {admin:0, validator:1, builder:2, requestor:3};
+  const sorted = [...users].sort((a,b) => (roleOrder[a.role]||9) - (roleOrder[b.role]||9));
+
+  return (
+    <div className="space-y-6 max-w-4xl">
+      {/* Header banner */}
+      <div className="rounded-2xl px-7 py-6 text-white relative overflow-hidden"
+           style={{background:'linear-gradient(135deg,#001540 0%,#00205B 50%,#0062A3 80%,#009DC4 100%)'}}>
+        <div className="absolute inset-0 pointer-events-none"
+             style={{backgroundImage:'linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px)',backgroundSize:'32px 32px'}}/>
+        <div className="relative z-10 flex items-center gap-4">
+          <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center flex-shrink-0">
+            <IconUsers size={20} c="text-white"/>
+          </div>
+          <div>
+            <h1 className="text-2xl font-extrabold tracking-tight">Team Management</h1>
+            <p className="text-white/55 text-sm mt-0.5">Manage user access, roles, and account status.</p>
+          </div>
+          <div className="ml-auto text-right">
+            <div className="text-3xl font-black text-white">{users.length}</div>
+            <div className="text-white/50 text-xs font-bold uppercase tracking-widest mt-0.5">Members</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Add user form */}
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+        <h2 className="text-sm font-bold text-slate-700 mb-4 flex items-center gap-2">
+          <span className="w-5 h-5 rounded-full bg-sia-teal/10 flex items-center justify-center text-sia-teal font-black text-xs">+</span>
+          Add new user
+        </h2>
+        <form onSubmit={addUser} className="flex flex-wrap gap-3 items-end">
+          <div className="flex flex-col gap-1 flex-1 min-w-36">
+            <label className="text-xs font-semibold text-slate-500">Name</label>
+            <input value={newForm.name} onChange={e=>setNewForm({...newForm,name:e.target.value})}
+                   placeholder="Full name"
+                   className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30"/>
+          </div>
+          <div className="flex flex-col gap-1 flex-1 min-w-48">
+            <label className="text-xs font-semibold text-slate-500">Email</label>
+            <input value={newForm.email} onChange={e=>setNewForm({...newForm,email:e.target.value})}
+                   placeholder="email@sia-partners.com" type="email"
+                   className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30"/>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-semibold text-slate-500">Role</label>
+            <select value={newForm.role} onChange={e=>setNewForm({...newForm,role:e.target.value})}
+                    className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30">
+              <option value="admin">Admin</option>
+              <option value="validator">Validator</option>
+              <option value="builder">Builder</option>
+              <option value="requestor">Requestor</option>
+            </select>
+          </div>
+          <button type="submit"
+                  className="px-4 py-2 rounded-xl bg-sia-navy text-white text-sm font-semibold hover:bg-sia-mid transition-colors flex-shrink-0">
+            Add user
+          </button>
+        </form>
+        {newError && <p className="text-xs text-red-500 mt-2">{newError}</p>}
+      </div>
+
+      {/* User table */}
+      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-slate-100">
+              <th className="text-left px-5 py-3 text-xs font-bold text-slate-400 uppercase tracking-wider">Name</th>
+              <th className="text-left px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-wider hidden sm:table-cell">Email</th>
+              <th className="text-left px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-wider">Role</th>
+              <th className="text-left px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-wider">Status</th>
+              <th className="px-4 py-3 text-xs font-bold text-slate-400 uppercase tracking-wider text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map(u => {
+              const inactive = u.active === false;
+              const isEditing = editingId === u.id;
+              const isSelf = u.id === user.id;
+              return (
+                <React.Fragment key={u.id}>
+                  <tr className={`border-b border-slate-50 transition-colors ${inactive ? 'opacity-50' : 'hover:bg-slate-50'}`}>
+                    <td className="px-5 py-3">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
+                             style={{background: inactive ? '#94a3b8' : (ROLE_COLORS[u.role]||'#475569')}}>
+                          {initials(u.name)}
+                        </div>
+                        <span className={`font-medium text-slate-800 ${inactive ? 'italic' : ''}`}>
+                          {u.name}
+                          {isSelf && <span className="ml-1.5 text-[10px] text-sia-teal font-bold">(you)</span>}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-slate-500 text-xs hidden sm:table-cell">{u.email}</td>
+                    <td className="px-4 py-3"><RoleBadge role={u.role}/></td>
+                    <td className="px-4 py-3">
+                      {inactive
+                        ? <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-400">Inactive</span>
+                        : <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">Active</span>
+                      }
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5 justify-end">
+                        <button onClick={()=>toggleActive(u)}
+                                title={inactive ? 'Reactivate' : 'Deactivate'}
+                                className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${inactive ? 'border-emerald-200 text-emerald-700 hover:bg-emerald-50' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}>
+                          {inactive ? 'Reactivate' : 'Deactivate'}
+                        </button>
+                        <button onClick={()=> isEditing ? cancelEdit() : startEdit(u)}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-sia-navy hover:bg-slate-100 transition-colors"
+                                title="Edit">
+                          {isEditing ? <IconX size={14}/> : <IconEdit size={14}/>}
+                        </button>
+                        <button onClick={()=>removeUser(u)}
+                                className={`p-1.5 rounded-lg transition-colors ${isSelf ? 'text-slate-200 cursor-not-allowed' : 'text-slate-300 hover:text-red-500 hover:bg-red-50'}`}
+                                title={isSelf ? 'Cannot remove yourself' : 'Remove user'}>
+                          <IconTrash size={14}/>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                  {isEditing && (
+                    <tr className="bg-slate-50 border-b border-slate-100">
+                      <td colSpan={5} className="px-5 py-4">
+                        <div className="flex flex-wrap gap-3 items-end">
+                          <div className="flex flex-col gap-1 flex-1 min-w-36">
+                            <label className="text-xs font-semibold text-slate-500">Name</label>
+                            <input value={editForm.name} onChange={e=>setEditForm({...editForm,name:e.target.value})}
+                                   className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30"/>
+                          </div>
+                          <div className="flex flex-col gap-1 flex-1 min-w-48">
+                            <label className="text-xs font-semibold text-slate-500">Email</label>
+                            <input value={editForm.email} onChange={e=>setEditForm({...editForm,email:e.target.value})}
+                                   type="email"
+                                   className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30"/>
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-semibold text-slate-500">Role</label>
+                            <select value={editForm.role} onChange={e=>setEditForm({...editForm,role:e.target.value})}
+                                    className="border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sia-teal/30">
+                              <option value="admin">Admin</option>
+                              <option value="validator">Validator</option>
+                              <option value="builder">Builder</option>
+                              <option value="requestor">Requestor</option>
+                            </select>
+                          </div>
+                          <div className="flex gap-2">
+                            <button onClick={()=>saveEdit(u)}
+                                    className="px-4 py-2 rounded-xl bg-sia-navy text-white text-sm font-semibold hover:bg-sia-mid transition-colors">
+                              Save
+                            </button>
+                            <button onClick={cancelEdit}
+                                    className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 text-sm font-semibold hover:bg-slate-100 transition-colors">
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                        {isSelf && editForm.role !== 'admin' && (
+                          <p className="text-xs text-amber-600 mt-2 flex items-center gap-1">
+                            <span className="font-bold">Warning:</span> Changing your own role away from admin will remove your admin access.
+                          </p>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ── PASSWORD GATE ───────────────────────────────────────────────────── */
+function PasswordGate({onAuth}) {
+  const [pw, setPw] = useState('');
+  const [error, setError] = useState(false);
+  const check = () => {
+    if (pw === 'RCESIA2026') {
+      sessionStorage.setItem('rce_auth', btoa('RCESIA2026:rce-sia'));
+      onAuth();
+    } else {
+      setError(true);
+      setPw('');
+    }
+  };
+  return (
+    <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'#00205B'}}>
+      <div style={{background:'white',borderRadius:'12px',padding:'40px',width:'360px',maxWidth:'90vw',boxShadow:'0 20px 60px rgba(0,0,0,0.35)'}}>
+        <div style={{textAlign:'center',marginBottom:'28px'}}>
+          <div style={{width:'52px',height:'52px',background:'#009DC4',borderRadius:'10px',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 14px',color:'white',fontWeight:'800',fontSize:'13px',letterSpacing:'1px'}}>SIA</div>
+          <h1 style={{fontSize:'18px',fontWeight:'700',color:'#00205B',margin:'0 0 6px'}}>RCE Agent Tracker</h1>
+          <p style={{fontSize:'13px',color:'#64748b',margin:0}}>Enter your access password to continue</p>
+        </div>
+        <input
+          type="password"
+          value={pw}
+          onChange={e=>{setPw(e.target.value);setError(false);}}
+          onKeyDown={e=>e.key==='Enter'&&check()}
+          placeholder="Password"
+          autoFocus
+          style={{
+            width:'100%',padding:'10px 12px',border:'1.5px solid',
+            borderColor:error?'#ef4444':'#e2e8f0',borderRadius:'8px',
+            fontSize:'14px',outline:'none',boxSizing:'border-box',
+            marginBottom:error?'6px':'14px'
+          }}
+        />
+        {error && <p style={{color:'#ef4444',fontSize:'12px',margin:'0 0 12px'}}>Incorrect password. Please try again.</p>}
+        <button
+          onClick={check}
+          style={{width:'100%',padding:'11px',background:'#009DC4',color:'white',border:'none',borderRadius:'8px',fontSize:'14px',fontWeight:'600',cursor:'pointer'}}
+        >
+          Access Dashboard
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── LAYOUT WRAPPER ─────────────────────────────────────────────────── */
+function Layout({user, children}) {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const hash = useHash();
+  const page = hash.replace(/#\/([^/]*).*/, '$1') || 'dashboard';
+  const PAGE_TITLES = {
+    dashboard:'Dashboard', agents:'All Agents', 'my-agents':'My Agents',
+    backlog:'Backlog', validation:'Validation Queue', governance:'Governance',
+    import:'Import Agents', 'admin/team':'Team Management'
+  };
+  const fullPath = hash.replace(/^#\//, '') || 'dashboard';
+
+  return (
+    <div className="flex min-h-screen bg-slate-50">
+      <Sidebar user={user} open={sidebarOpen} onClose={()=>setSidebarOpen(false)}/>
+      <div className="flex-1 min-w-0 flex flex-col">
+        {/* Topbar */}
+        <header className="bg-white border-b border-slate-100 px-4 py-3 flex items-center gap-3 sticky top-0 z-30">
+          <button onClick={()=>setSidebarOpen(true)} className="lg:hidden text-slate-500 hover:text-slate-800">
+            <IconMenu size={20}/>
+          </button>
+          <h2 className="text-sm font-bold text-slate-700">{PAGE_TITLES[fullPath] || PAGE_TITLES[page] || 'RCE Agent Tracker'}</h2>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={()=>{
+                fetch('/api/data')
+                  .then(r=>r.json())
+                  .then(data=>{
+                    if(data.agents?.length)  lsSetLocal('rce_agents', data.agents);
+                    if(data.users?.length)   lsSetLocal('rce_users',  data.users);
+                    if(data.history?.length) lsSetLocal('rce_history',data.history);
+                    window.location.reload();
+                  })
+                  .catch(()=>window.location.reload());
+              }}
+              className="hidden sm:inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-slate-200 text-slate-500 hover:text-slate-700 hover:border-slate-300 transition-colors"
+              title="Pull latest data from server"
+            >↻ Sync</button>
+            {user && (
+              <div className="flex items-center gap-2 text-xs text-slate-500">
+                <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold"
+                     style={{background:ROLE_COLORS[user.role]||'#475569'}}>
+                  {initials(user.name)}
+                </div>
+                <span className="hidden sm:inline font-medium">{user.name.split(' ')[0]}</span>
+                <span className="hidden sm:inline text-slate-300">|</span>
+                <span className="hidden sm:inline capitalize text-slate-400">{user.role}</span>
+              </div>
+            )}
+          </div>
+        </header>
+        <main className="flex-1 px-4 sm:px-6 py-6 overflow-y-auto">
+          {children}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+/* ── ROUTER ─────────────────────────────────────────────────────────── */
+function AppRouter() {
+  const hash = useHash();
+  const [user, setUser] = useState(getSession());
+
+  // Sync user from storage when hash changes (after login)
+  useEffect(() => {
+    setUser(getSession());
+  }, [hash]);
+
+  const path = hash.replace(/^#\//, '');
+  const parts = path.split('/');
+  const page = parts[0] || 'dashboard';
+
+  if (page === 'login' || !user) {
+    return (
+      <>
+        <LoginPage/>
+        <Toast/>
+      </>
+    );
+  }
+
+  let content;
+  if (page === 'dashboard') {
+    content = <DashboardPage user={user}/>;
+  } else if (page === 'agents' && parts[1]) {
+    content = <AgentDetailPage user={user} agentId={parts[1]}/>;
+  } else if (page === 'agents') {
+    content = <AgentsPage user={user}/>;
+  } else if (page === 'my-agents') {
+    content = <MyAgentsPage user={user}/>;
+  } else if (page === 'backlog') {
+    content = <BacklogPage user={user}/>;
+  } else if (page === 'validation') {
+    content = <ValidationQueuePage user={user}/>;
+  } else if (page === 'governance') {
+    content = <GovernancePage/>;
+  } else if (page === 'import') {
+    content = <ImportPage user={user}/>;
+  } else if (page === 'admin' && parts[1] === 'team') {
+    content = user.role === 'admin' ? <TeamPage user={user}/> : <DashboardPage user={user}/>;
+  } else {
+    content = <DashboardPage user={user}/>;
+  }
+
+  return (
+    <>
+      <Layout user={user}>{content}</Layout>
+      <Toast/>
+    </>
+  );
+}
+
+/* ── APP SHELL: password gate + API bootstrap ────────────────────────── */
+function App() {
+  const isAuthed = () => sessionStorage.getItem('rce_auth') === btoa('RCESIA2026:rce-sia');
+  const [authenticated, setAuthenticated] = useState(isAuthed);
+  const [apiLoading, setApiLoading] = useState(isAuthed);
+
+  useEffect(() => {
+    if (!authenticated) return;
+    fetch('/api/data')
+      .then(r => r.ok ? r.json() : {})
+      .then(data => {
+        if (data.agents?.length)  lsSetLocal('rce_agents',  data.agents);
+        if (data.users?.length)   lsSetLocal('rce_users',   data.users);
+        if (data.history?.length) lsSetLocal('rce_history', data.history);
+      })
+      .catch(() => {})
+      .finally(() => { seed(); setApiLoading(false); });
+  }, [authenticated]);
+
+  if (!authenticated) {
+    return <PasswordGate onAuth={() => { setAuthenticated(true); setApiLoading(true); }}/>;
+  }
+  if (apiLoading) {
+    return (
+      <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'#00205B'}}>
+        <div style={{textAlign:'center',color:'white'}}>
+          <div style={{fontSize:'28px',marginBottom:'8px',opacity:.5}}>⟳</div>
+          <div style={{fontSize:'13px',opacity:.7,letterSpacing:'.3px'}}>Loading dashboard…</div>
+        </div>
+      </div>
+    );
+  }
+  return <AppRouter/>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
