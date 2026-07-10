@@ -422,7 +422,7 @@ function LoginPage() {
 
   function login(u) {
     saveSession(u);
-    navigate('#/dashboard');
+    window.location.reload();
   }
 
   return (
