@@ -2600,51 +2600,6 @@ function TeamPage({user}) {
 }
 
 /* ── PASSWORD GATE ───────────────────────────────────────────────────── */
-function PasswordGate({onAuth}) {
-  const [pw, setPw] = useState('');
-  const [error, setError] = useState(false);
-  const check = () => {
-    if (pw === 'RCESIA2026') {
-      sessionStorage.setItem('rce_auth', btoa('RCESIA2026:rce-sia'));
-      onAuth();
-    } else {
-      setError(true);
-      setPw('');
-    }
-  };
-  return (
-    <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'#00205B'}}>
-      <div style={{background:'white',borderRadius:'12px',padding:'40px',width:'360px',maxWidth:'90vw',boxShadow:'0 20px 60px rgba(0,0,0,0.35)'}}>
-        <div style={{textAlign:'center',marginBottom:'28px'}}>
-          <div style={{width:'52px',height:'52px',background:'#009DC4',borderRadius:'10px',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 14px',color:'white',fontWeight:'800',fontSize:'13px',letterSpacing:'1px'}}>SIA</div>
-          <h1 style={{fontSize:'18px',fontWeight:'700',color:'#00205B',margin:'0 0 6px'}}>RCE Agent Tracker</h1>
-          <p style={{fontSize:'13px',color:'#64748b',margin:0}}>Enter your access password to continue</p>
-        </div>
-        <input
-          type="password"
-          value={pw}
-          onChange={e=>{setPw(e.target.value);setError(false);}}
-          onKeyDown={e=>e.key==='Enter'&&check()}
-          placeholder="Password"
-          autoFocus
-          style={{
-            width:'100%',padding:'10px 12px',border:'1.5px solid',
-            borderColor:error?'#ef4444':'#e2e8f0',borderRadius:'8px',
-            fontSize:'14px',outline:'none',boxSizing:'border-box',
-            marginBottom:error?'6px':'14px'
-          }}
-        />
-        {error && <p style={{color:'#ef4444',fontSize:'12px',margin:'0 0 12px'}}>Incorrect password. Please try again.</p>}
-        <button
-          onClick={check}
-          style={{width:'100%',padding:'11px',background:'#009DC4',color:'white',border:'none',borderRadius:'8px',fontSize:'14px',fontWeight:'600',cursor:'pointer'}}
-        >
-          Access Dashboard
-        </button>
-      </div>
-    </div>
-  );
-}
 
 /* ── LAYOUT WRAPPER ─────────────────────────────────────────────────── */
 function Layout({user, children}) {
@@ -2771,14 +2726,11 @@ function AppRouter() {
   );
 }
 
-/* ── APP SHELL: password gate + API bootstrap ────────────────────────── */
+/* ── APP SHELL: API bootstrap ────────────────────────────────────────── */
 function App() {
-  const isAuthed = () => sessionStorage.getItem('rce_auth') === btoa('RCESIA2026:rce-sia');
-  const [authenticated, setAuthenticated] = useState(isAuthed);
-  const [apiLoading, setApiLoading] = useState(isAuthed);
+  const [apiLoading, setApiLoading] = useState(true);
 
   useEffect(() => {
-    if (!authenticated) return;
     fetch('/api/data')
       .then(r => r.ok ? r.json() : {})
       .then(data => {
@@ -2788,11 +2740,7 @@ function App() {
       })
       .catch(() => {})
       .finally(() => { seed(); setApiLoading(false); });
-  }, [authenticated]);
-
-  if (!authenticated) {
-    return <PasswordGate onAuth={() => { setAuthenticated(true); setApiLoading(true); }}/>;
-  }
+  }, []);
   if (apiLoading) {
     return (
       <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'#00205B'}}>
