@@ -1204,6 +1204,10 @@ function MyAgentsPage({user}) {
   } else {
     myAgents = agents.filter(a => a.requestor_id === user.id);
   }
+  // Agents where the user is assigned as a tester (any role can be a tester)
+  const testingAgents = agents.filter(a =>
+    (a.testers || []).includes(user.id) && a.requestor_id !== user.id && a.builder_id !== user.id
+  );
 
   const NEXT_STATUS = {to_be_started:'in_building', in_building:'built', built:'requestor_testing', requestor_testing:'tested', tested:'live'};
 
@@ -1224,49 +1228,76 @@ function MyAgentsPage({user}) {
 
   const isBuilderOrAdmin = user.role === 'builder' || user.role === 'admin';
 
-  return (
-    <div className="space-y-4">
-      <h1 className="text-xl font-extrabold text-slate-800">My Agents <span className="text-slate-400 font-normal text-base">({myAgents.length})</span></h1>
-      {myAgents.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-10 text-center">
-          <p className="text-slate-400 text-sm">No agents assigned to you.</p>
+  function AgentRow({a, sublabel}) {
+    const next = NEXT_STATUS[a.build_status];
+    return (
+      <div className="bg-white rounded-xl border border-slate-100 shadow-sm px-5 py-4 flex items-center gap-4 flex-wrap">
+        <div className="flex-1 min-w-0">
+          <div className="font-semibold text-slate-800 text-sm cursor-pointer hover:text-sia-teal truncate"
+               onClick={()=>navigate(`#/agents/${a.id}`)}>{a.name}</div>
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
+            <StatusBadge status={a.build_status}/>
+            <PriorityBadge priority={a.priority}/>
+            {sublabel && <span className="text-xs text-slate-400">{sublabel}</span>}
+          </div>
         </div>
-      ) : (
-        <div className="space-y-2">
-          {myAgents.map(a => {
-            const next = NEXT_STATUS[a.build_status];
-            return (
-              <div key={a.id} className="bg-white rounded-xl border border-slate-100 shadow-sm px-5 py-4 flex items-center gap-4 flex-wrap">
-                <div className="flex-1 min-w-0">
-                  <div className="font-semibold text-slate-800 text-sm cursor-pointer hover:text-sia-teal truncate"
-                       onClick={()=>navigate(`#/agents/${a.id}`)}>{a.name}</div>
-                  <div className="flex items-center gap-2 mt-1 flex-wrap">
-                    <StatusBadge status={a.build_status}/>
-                    <PriorityBadge priority={a.priority}/>
-                    {isBuilderOrAdmin && <span className="text-xs text-slate-400">Req: {userName(a.requestor_id, users)}</span>}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  {a.siagpt_link && (
-                    <a href={a.siagpt_link} target="_blank" rel="noopener noreferrer"
-                       className="text-sia-teal text-xs font-medium flex items-center gap-1 hover:underline">
-                      SiaGPT <IconExtLink size={11}/>
-                    </a>
-                  )}
-                  {isBuilderOrAdmin && next && (
-                    <button onClick={()=>advance(a)}
-                            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-sia-navy text-white hover:bg-sia-mid transition-colors">
-                      → {STATUS_CFG[next].label}
-                    </button>
-                  )}
-                  <button onClick={()=>navigate(`#/agents/${a.id}`)}
-                          className="text-slate-400 hover:text-slate-700">
-                    <IconChevron size={16} dir="right"/>
-                  </button>
-                </div>
-              </div>
-            );
-          })}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {a.siagpt_link && (
+            <a href={a.siagpt_link} target="_blank" rel="noopener noreferrer"
+               className="text-sia-teal text-xs font-medium flex items-center gap-1 hover:underline">
+              SiaGPT <IconExtLink size={11}/>
+            </a>
+          )}
+          {isBuilderOrAdmin && next && (
+            <button onClick={()=>advance(a)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-sia-navy text-white hover:bg-sia-mid transition-colors">
+              → {STATUS_CFG[next].label}
+            </button>
+          )}
+          <button onClick={()=>navigate(`#/agents/${a.id}`)}
+                  className="text-slate-400 hover:text-slate-700">
+            <IconChevron size={16} dir="right"/>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <h1 className="text-xl font-extrabold text-slate-800">My Agents</h1>
+
+      {/* Primary list: built / requested / assigned */}
+      <div className="space-y-3">
+        <h2 className="text-sm font-bold text-slate-500 uppercase tracking-wider">
+          {isBuilderOrAdmin ? 'Assigned to build' : 'Requested by me'} ({myAgents.length})
+        </h2>
+        {myAgents.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-8 text-center">
+            <p className="text-slate-400 text-sm">No agents here yet.</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {myAgents.map(a => (
+              <AgentRow key={a.id} a={a}
+                sublabel={isBuilderOrAdmin ? `Req: ${userName(a.requestor_id, users)}` : null}/>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Testing list: assigned as tester */}
+      {testingAgents.length > 0 && (
+        <div className="space-y-3">
+          <h2 className="text-sm font-bold text-slate-500 uppercase tracking-wider">
+            Assigned to test ({testingAgents.length})
+          </h2>
+          <div className="space-y-2">
+            {testingAgents.map(a => (
+              <AgentRow key={a.id} a={a}
+                sublabel={`Req: ${userName(a.requestor_id, users)}`}/>
+            ))}
+          </div>
         </div>
       )}
     </div>
